@@ -33,6 +33,7 @@ struct SidebarView: View {
             } header: {
                 HStack {
                     Text("Library")
+                        .font(.system(size: 16.5, weight: .semibold))
                     Spacer()
                     // `.bordered` + `.circle` is the same construction the
                     // toolbar's Save button renders with, so the two match
@@ -54,7 +55,7 @@ struct SidebarView: View {
                     .padding(.trailing, 6)
                     .help("Add markdown files\u{2026}")
                 }
-                .padding(.bottom, 8)
+                .padding(.bottom, 16)
             }
         }
         .listStyle(.sidebar)
