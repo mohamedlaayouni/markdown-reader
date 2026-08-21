@@ -1,0 +1,7 @@
+# Every change requires review from the repository owner.
+#
+# Combined with "Require review from Code Owners" in the branch protection
+# rules for main, this is what makes owner approval mandatory before anything
+# can be merged - rather than merely requiring *some* approval, which any
+# collaborator could otherwise supply.
+* @mohamedlaayouni
