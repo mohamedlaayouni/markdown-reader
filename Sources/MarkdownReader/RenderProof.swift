@@ -214,3 +214,55 @@ enum CursorProof {
         return ok ? 0 : 1
     }
 }
+
+
+// MARK: - Checkbox hit-target proof
+
+/// Confirms task-list checkboxes actually carry the `taskToggleLine` attribute
+/// that `MeasuredTextView.mouseDown` reads, and that the lines are the real
+/// source lines. Without this, "checkboxes are clickable" rests on the click
+/// path being wired correctly with nothing proving the target exists.
+@MainActor
+enum CheckboxProof {
+    static func run(path: String) -> Int32 {
+        guard let markdown = try? String(contentsOf: URL(filePath: path), encoding: .utf8) else {
+            FileHandle.standardError.write(Data("cannot read \(path)\n".utf8))
+            return 1
+        }
+
+        let rendered = PreviewRenderer.render(markdown, face: .sans)
+        let sourceLines = markdown.components(separatedBy: "\n")
+
+        var found: [(index: Int, line: Int, glyph: String)] = []
+        rendered.enumerateAttribute(
+            .taskToggleLine,
+            in: NSRange(location: 0, length: rendered.length)
+        ) { value, range, _ in
+            guard let line = value as? Int else { return }
+            found.append((range.location, line, (rendered.string as NSString).substring(with: range)))
+        }
+
+        guard !found.isEmpty else {
+            print("FAIL: no checkbox hit-targets in the rendered output")
+            return 1
+        }
+
+        var ok = true
+        for hit in found {
+            let sourceIndex = hit.line - 1
+            let source = sourceLines.indices.contains(sourceIndex) ? sourceLines[sourceIndex] : "<out of range>"
+            // The attributed run should be the checkbox glyph, and the source
+            // line it points at should genuinely contain a task marker.
+            let hasMarker = source.contains("[ ]") || source.contains("[x]") || source.contains("[X]")
+            let glyphOK = hit.glyph.contains("\u{2610}") || hit.glyph.contains("\u{2611}")
+            let status = (hasMarker && glyphOK) ? "ok  " : "BAD "
+            if !(hasMarker && glyphOK) { ok = false }
+            print("\(status)charIndex=\(hit.index) line=\(hit.line) glyph=\(hit.glyph.debugDescription) source=\(source.trimmingCharacters(in: .whitespaces).debugDescription)")
+        }
+
+        print(ok
+            ? "PASS: \(found.count) checkbox hit-target(s), all mapped to real task lines"
+            : "FAIL: some hit-targets did not line up")
+        return ok ? 0 : 1
+    }
+}

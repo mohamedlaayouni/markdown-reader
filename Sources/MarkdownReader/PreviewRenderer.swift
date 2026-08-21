@@ -8,24 +8,13 @@ extension NSAttributedString.Key {
     static let blockFill = NSAttributedString.Key("mdBlockFill")
     /// Range should be painted as a horizontal rule across the text column.
     static let blockRule = NSAttributedString.Key("mdBlockRule")
-}
-
-/// Clickable task-list checkboxes are delivered as links with a private scheme,
-/// so `NSTextView` gives us hit-testing and the pointing-hand cursor for free.
-/// The host turns a click into a source edit; nothing is written to disk until
-/// the user saves, exactly like typing.
-enum TaskToggleLink {
-    static let scheme = "mdreader-task"
-
-    static func url(line: Int) -> URL? {
-        URL(string: "\(scheme)://toggle/\(line)")
-    }
-
-    /// The 1-based source line to toggle, or nil if this isn't our link.
-    static func line(from url: URL) -> Int? {
-        guard url.scheme == scheme else { return nil }
-        return Int(url.lastPathComponent)
-    }
+    /// This range is a task-list checkbox; the value is its 1-based source line.
+    ///
+    /// Hit-testing goes through this rather than the `.link` attribute. Links
+    /// depend on `NSTextView`'s link delegation, which did not fire reliably for
+    /// the checkbox runs; a `mouseDown` override reading this attribute is a
+    /// direct path with nothing in between.
+    static let taskToggleLine = NSAttributedString.Key("mdTaskToggleLine")
 }
 
 /// Turns a parsed markdown tree into an `NSAttributedString` for the preview.
@@ -363,10 +352,8 @@ struct PreviewRenderer: MarkupVisitor {
             bulletAttributes[.foregroundColor] = checkbox == .checked
                 ? NSColor.controlAccentColor
                 : NSColor.secondaryLabelColor
-            if let line = child.range?.lowerBound.line, let url = TaskToggleLink.url(line: line) {
-                bulletAttributes[.link] = url
-                // The generic link styling would underline it in blue.
-                bulletAttributes[.underlineStyle] = 0
+            if let line = child.range?.lowerBound.line {
+                bulletAttributes[.taskToggleLine] = line
             }
         }
 

@@ -51,6 +51,10 @@ struct MarkdownTextPane: NSViewRepresentable {
         scrollView.drawsBackground = false
         scrollView.autohidesScrollers = true
 
+        textView.onTaskToggle = { [weak coordinator = context.coordinator] line in
+            coordinator?.onToggleTask(line)
+        }
+
         context.coordinator.textView = textView
         context.coordinator.install(content, mode: mode, token: contentToken)
         return scrollView
@@ -148,19 +152,6 @@ struct MarkdownTextPane: NSViewRepresentable {
 
         // MARK: NSTextViewDelegate
 
-        /// Intercepts our private checkbox scheme; everything else (real links in
-        /// the document) falls through to the default handler, which opens it.
-        func textView(_ textView: NSTextView, clickedOnLink link: Any, at charIndex: Int) -> Bool {
-            let url: URL? = switch link {
-            case let url as URL: url
-            case let string as String: URL(string: string)
-            default: nil
-            }
-            guard let url, let line = TaskToggleLink.line(from: url) else { return false }
-            onToggleTask(line)
-            return true
-        }
-
         func textDidChange(_ notification: Notification) {
             guard !isInstalling, let textView = notification.object as? NSTextView,
                   let storage = textView.textStorage else { return }
@@ -190,6 +181,9 @@ final class MeasuredTextView: NSTextView {
         didSet { if measure != oldValue { needsLayout = true } }
     }
 
+    /// Called when a task-list checkbox is clicked, with its 1-based source line.
+    var onTaskToggle: ((Int) -> Void)?
+
     /// `NSTextView.linkTextAttributes` has a system default (blue + underline)
     /// that overrides whatever color/underline a run already carries - which is
     /// what made task-checkbox links (styled explicitly, on purpose, to look
@@ -203,6 +197,30 @@ final class MeasuredTextView: NSTextView {
     /// instead of in an initializer.
     func disableDefaultLinkChrome() {
         linkTextAttributes = [:]
+    }
+
+    /// Intercepts clicks on task-list checkboxes before the text view treats
+    /// them as a selection gesture.
+    ///
+    /// `characterIndexForInsertion` returns the nearest insertion point, which
+    /// for a single-glyph checkbox can land on either side of it - so both the
+    /// index and the one before it are checked.
+    override func mouseDown(with event: NSEvent) {
+        guard !isEditable, let storage = textStorage, storage.length > 0 else {
+            super.mouseDown(with: event)
+            return
+        }
+
+        let point = convert(event.locationInWindow, from: nil)
+        let index = characterIndexForInsertion(at: point)
+
+        for candidate in [index, index - 1] where candidate >= 0 && candidate < storage.length {
+            if let line = storage.attribute(.taskToggleLine, at: candidate, effectiveRange: nil) as? Int {
+                onTaskToggle?(line)
+                return
+            }
+        }
+        super.mouseDown(with: event)
     }
 
     override func layout() {

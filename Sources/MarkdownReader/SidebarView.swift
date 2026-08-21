@@ -46,6 +46,12 @@ struct SidebarView: View {
                     .buttonStyle(.bordered)
                     .buttonBorderShape(.circle)
                     .controlSize(.small)
+                    // A bordered button draws its border at its own bounds, so
+                    // without this it sits visibly tighter to the sidebar's
+                    // trailing edge than the file rows below it do. The previous
+                    // borderless glyph had slack inside a larger frame and did
+                    // not need it.
+                    .padding(.trailing, 6)
                     .help("Add markdown files\u{2026}")
                 }
                 .padding(.bottom, 8)

@@ -98,6 +98,9 @@ struct Entry {
         if arguments.first == "--render-icon", arguments.count > 1 {
             exit(MainActor.assumeIsolated { IconProof.run(outputPath: arguments[1]) })
         }
+        if arguments.first == "--test-checkboxes", arguments.count > 1 {
+            exit(MainActor.assumeIsolated { CheckboxProof.run(path: arguments[1]) })
+        }
         if arguments.first == "--test-cursor" {
             exit(MainActor.assumeIsolated { CursorProof.run() })
         }

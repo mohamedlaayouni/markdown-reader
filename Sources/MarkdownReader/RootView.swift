@@ -293,45 +293,23 @@ private struct WindowConfiguration: NSViewRepresentable {
         DispatchQueue.main.async {
             guard let window = view.window else { return }
             window.isDocumentEdited = isDocumentEdited
-            // Idempotent - cheap to repeat on every SwiftUI update, and this is
-            // the only reliable point where the window is guaranteed to exist.
-            FullScreenChrome.shared.attach(to: window)
-        }
-    }
-
-    /// Makes the toolbar auto-hide in fullscreen, with no gap left behind.
-    ///
-    /// macOS keeps a toolbar permanently visible in fullscreen unless the app
-    /// opts into `.autoHideToolbar`. The first version of this set that
-    /// reactively, from `didEnterFullScreenNotification` - which fires AFTER
-    /// the window's fullscreen frame is already computed on the assumption
-    /// that the menu bar strip is reserved. Setting `.autoHideMenuBar`
-    /// afterward doesn't reclaim that space, so a black gap the height of the
-    /// menu bar was left sitting above the toolbar.
-    ///
-    /// `windowWillUseFullScreenPresentationOptions` is the delegate hook Apple
-    /// provides for exactly this: it supplies the options synchronously, as
-    /// part of the transition, so the frame is computed correctly the first
-    /// time and no gap appears at all.
-    @MainActor
-    final class FullScreenChrome: NSObject, NSWindowDelegate {
-        static let shared = FullScreenChrome()
-        private weak var attachedWindow: NSWindow?
-
-        func attach(to window: NSWindow) {
-            guard attachedWindow !== window else { return }
-            attachedWindow = window
-            window.delegate = self
-        }
-
-        func window(
-            _ window: NSWindow,
-            willUseFullScreenPresentationOptions proposedOptions: NSApplication.PresentationOptions = []
-        ) -> NSApplication.PresentationOptions {
-            [.fullScreen, .autoHideToolbar, .autoHideMenuBar]
         }
     }
 }
+
+// Fullscreen note, so this does not get "fixed" back:
+//
+// An earlier version opted the window into `.autoHideToolbar` so the toolbar
+// would slide away in fullscreen. That is what caused the sidebar's "Library"
+// header to be swallowed: `.autoHideToolbar` turns the toolbar into an OVERLAY
+// rather than a bar that reserves space, and combined with a hidden toolbar
+// background SwiftUI then stops insetting content for it - so the toolbar sat on
+// top of the sidebar and clipped its first rows.
+//
+// Letting the toolbar reserve its space normally is what keeps the layout
+// correct. It stays visible in fullscreen, but `.toolbarBackgroundVisibility`
+// is hidden, so it reads as controls floating over the page rather than as a
+// separate bar.
 
 extension View {
     func windowConfiguration(isDocumentEdited: Bool) -> some View {
