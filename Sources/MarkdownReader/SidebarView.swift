@@ -41,11 +41,11 @@ struct SidebarView: View {
                     // squarish hover chrome.
                     Button(action: onAdd) {
                         Image(systemName: "plus")
-                            .font(.system(size: 12, weight: .medium))
+                            .font(.system(size: 15, weight: .medium))
                     }
                     .buttonStyle(.bordered)
                     .buttonBorderShape(.circle)
-                    .controlSize(.small)
+                    .controlSize(.large)
                     // A bordered button draws its border at its own bounds, so
                     // without this it sits visibly tighter to the sidebar's
                     // trailing edge than the file rows below it do. The previous
