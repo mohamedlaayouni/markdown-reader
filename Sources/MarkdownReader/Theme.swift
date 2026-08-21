@@ -21,7 +21,7 @@ enum Theme {
     static let sourceSize: CGFloat = 13.5
     static let sourceLineHeightMultiple: CGFloat = 1.42
 
-    static let textInset = NSSize(width: 34, height: 18)
+    static let textInset = NSSize(width: 34, height: 32)
 
     /// Gap above and below a fenced code block. Applied as paragraph spacing on
     /// the block's first and last lines, which means it lands INSIDE the line
