@@ -293,6 +293,11 @@ private struct WindowConfiguration: NSViewRepresentable {
         DispatchQueue.main.async {
             guard let window = view.window else { return }
             window.isDocumentEdited = isDocumentEdited
+            // Fullscreen otherwise restores AppKit's titlebar divider even
+            // though SwiftUI has made the toolbar background transparent.
+            // Suppress the native separator so fullscreen and windowed chrome
+            // keep the same floating, borderless treatment.
+            window.titlebarSeparatorStyle = .none
         }
     }
 }
