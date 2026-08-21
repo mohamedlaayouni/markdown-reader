@@ -48,6 +48,7 @@ struct SidebarView: View {
                     .controlSize(.small)
                     .help("Add markdown files\u{2026}")
                 }
+                .padding(.bottom, 8)
             }
         }
         .listStyle(.sidebar)

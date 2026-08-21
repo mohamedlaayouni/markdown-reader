@@ -286,54 +286,49 @@ private struct WindowConfiguration: NSViewRepresentable {
     let isDocumentEdited: Bool
 
     func makeNSView(context: Context) -> NSView {
-        let view = NSView(frame: .zero)
-        FullScreenChrome.shared.startObservingFullScreen()
-        return view
+        NSView(frame: .zero)
     }
 
     func updateNSView(_ view: NSView, context: Context) {
         DispatchQueue.main.async {
             guard let window = view.window else { return }
             window.isDocumentEdited = isDocumentEdited
+            // Idempotent - cheap to repeat on every SwiftUI update, and this is
+            // the only reliable point where the window is guaranteed to exist.
+            FullScreenChrome.shared.attach(to: window)
         }
     }
 
-    /// Makes the toolbar auto-hide in fullscreen.
+    /// Makes the toolbar auto-hide in fullscreen, with no gap left behind.
     ///
-    /// macOS keeps a toolbar permanently visible in fullscreen; only a
-    /// toolbar-less window auto-hides its titlebar. That permanent strip is the
-    /// bar that sits at the top of the screen the whole time. Opting into
-    /// `.autoHideToolbar` gets the standard behaviour instead: the chrome slides
-    /// away and comes back when you push the pointer to the top edge.
+    /// macOS keeps a toolbar permanently visible in fullscreen unless the app
+    /// opts into `.autoHideToolbar`. The first version of this set that
+    /// reactively, from `didEnterFullScreenNotification` - which fires AFTER
+    /// the window's fullscreen frame is already computed on the assumption
+    /// that the menu bar strip is reserved. Setting `.autoHideMenuBar`
+    /// afterward doesn't reclaim that space, so a black gap the height of the
+    /// menu bar was left sitting above the toolbar.
+    ///
+    /// `windowWillUseFullScreenPresentationOptions` is the delegate hook Apple
+    /// provides for exactly this: it supplies the options synchronously, as
+    /// part of the transition, so the frame is computed correctly the first
+    /// time and no gap appears at all.
     @MainActor
-    final class FullScreenChrome {
+    final class FullScreenChrome: NSObject, NSWindowDelegate {
         static let shared = FullScreenChrome()
-        private var observing = false
+        private weak var attachedWindow: NSWindow?
 
-        func startObservingFullScreen() {
-            guard !observing else { return }
-            observing = true
+        func attach(to window: NSWindow) {
+            guard attachedWindow !== window else { return }
+            attachedWindow = window
+            window.delegate = self
+        }
 
-            NotificationCenter.default.addObserver(
-                forName: NSWindow.didEnterFullScreenNotification,
-                object: nil,
-                queue: .main
-            ) { _ in
-                MainActor.assumeIsolated {
-                    // `.autoHideToolbar` is only legal alongside `.fullScreen`.
-                    NSApp.presentationOptions = [.fullScreen, .autoHideToolbar, .autoHideMenuBar]
-                }
-            }
-
-            NotificationCenter.default.addObserver(
-                forName: NSWindow.didExitFullScreenNotification,
-                object: nil,
-                queue: .main
-            ) { _ in
-                MainActor.assumeIsolated {
-                    NSApp.presentationOptions = []
-                }
-            }
+        func window(
+            _ window: NSWindow,
+            willUseFullScreenPresentationOptions proposedOptions: NSApplication.PresentationOptions = []
+        ) -> NSApplication.PresentationOptions {
+            [.fullScreen, .autoHideToolbar, .autoHideMenuBar]
         }
     }
 }
