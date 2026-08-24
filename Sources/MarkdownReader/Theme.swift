@@ -9,14 +9,19 @@ enum Theme {
 
     // MARK: Metrics
 
-    /// Default reading width in points. Wide on purpose - narrower than the
-    /// window but well past the ~65-character measure a typography-first
-    /// editor would use.
-    static let defaultMeasure: CGFloat = 880
-    static let measureRange: ClosedRange<CGFloat> = 620...1040
+    /// Default reading width in points. Wide on purpose - this is a technical
+    /// reader, not a novel - but 880pt put ~122 characters on a line, and the
+    /// old 620pt floor meant the "Narrow" end of the slider was still ~86. The
+    /// range now reaches a real book measure at the bottom and keeps the wide
+    /// end for anyone who wants it.
+    static let defaultMeasure: CGFloat = 720
+    static let measureRange: ClosedRange<CGFloat> = 480...1040
 
     static let bodySize: CGFloat = 15.5
-    static let bodyLineHeightMultiple: CGFloat = 1.30
+    /// Leading has to grow with the measure, not stay fixed against it: the
+    /// longer the line, the more help the eye needs finding the start of the
+    /// next one. At 1.30 across a 100+ character line, it was losing its place.
+    static let bodyLineHeightMultiple: CGFloat = 1.50
 
     /// Heading sizes, h1 through h6.
     ///
@@ -94,6 +99,22 @@ enum Theme {
     static let codeBackground = dynamic(light: "F2F1EE", dark: "26262B")
     static let ruleColor: NSColor = .separatorColor
     static let gutterColor: NSColor = .tertiaryLabelColor
+}
+
+extension Theme {
+    /// Roughly how many characters fit on a line at `measure`.
+    ///
+    /// Points are not a reading decision; characters per line are. Measured from
+    /// a real sample rather than assumed, so it stays true across the three
+    /// selectable faces.
+    static func charactersPerLine(measure: CGFloat, face: BodyFace) -> Int {
+        let sample = "The quick brown fox jumps over the lazy dog. "
+        let width = (sample as NSString)
+            .size(withAttributes: [.font: body(face, size: bodySize)])
+            .width
+        guard width > 0 else { return 0 }
+        return Int((measure / (width / CGFloat(sample.count))).rounded())
+    }
 }
 
 extension NSColor {

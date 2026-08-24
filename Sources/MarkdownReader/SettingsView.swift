@@ -34,7 +34,7 @@ struct SettingsView: View {
                     } maximumValueLabel: {
                         Text("Wide").font(.caption2).foregroundStyle(.secondary)
                     }
-                    Text("\(Int(settings.measure)) pt column, centred in the window")
+                    Text("About \(Theme.charactersPerLine(measure: CGFloat(settings.measure), face: settings.face)) characters a line")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
