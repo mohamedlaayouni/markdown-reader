@@ -8,6 +8,9 @@ extension NSAttributedString.Key {
     static let blockFill = NSAttributedString.Key("mdBlockFill")
     /// Range should be painted as a horizontal rule across the text column.
     static let blockRule = NSAttributedString.Key("mdBlockRule")
+    /// Range should carry a blockquote bar down its left edge. The value is the
+    /// bar's x offset inside the text column, so nested quotes stack.
+    static let blockQuoteBar = NSAttributedString.Key("mdBlockQuoteBar")
     /// This range is a task-list checkbox; the value is its 1-based source line.
     ///
     /// Hit-testing goes through this rather than the `.link` attribute. Links
@@ -61,7 +64,7 @@ struct PreviewRenderer: MarkupVisitor {
     }
 
     private var blockIndent: CGFloat {
-        CGFloat(listDepth) * 22 + CGFloat(quoteDepth) * 18
+        CGFloat(listDepth) * 22 + CGFloat(quoteDepth) * Theme.quoteIndent
     }
 
     // MARK: Children
@@ -117,7 +120,7 @@ struct PreviewRenderer: MarkupVisitor {
         let out = joinChildren(paragraph)
         out.addAttribute(
             .paragraphStyle,
-            value: paragraphStyle(spacingAfter: 12, indent: blockIndent),
+            value: paragraphStyle(spacingAfter: Theme.paragraphGap, indent: blockIndent),
             range: NSRange(location: 0, length: out.length)
         )
         return out
@@ -282,13 +285,19 @@ struct PreviewRenderer: MarkupVisitor {
 
     mutating func visitBlockQuote(_ blockQuote: BlockQuote) -> NSAttributedString {
         quoteDepth += 1
+        let barX = CGFloat(quoteDepth - 1) * Theme.quoteIndent
         let out = joinBlocks(blockQuote)
         quoteDepth -= 1
 
-        out.addAttributes(
-            [.foregroundColor: NSColor.secondaryLabelColor],
-            range: NSRange(location: 0, length: out.length)
-        )
+        let full = NSRange(location: 0, length: out.length)
+        out.addAttributes([.foregroundColor: NSColor.secondaryLabelColor], range: full)
+
+        // Only where a deeper quote has not already claimed the gutter, so a
+        // nested quote keeps its own bar instead of the outer one erasing it.
+        out.enumerateAttribute(.blockQuoteBar, in: full) { existing, range, _ in
+            guard existing == nil else { return }
+            out.addAttribute(.blockQuoteBar, value: NSNumber(value: Double(barX)), range: range)
+        }
         return out
     }
 

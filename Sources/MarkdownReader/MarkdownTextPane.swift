@@ -254,6 +254,7 @@ final class MeasuredTextView: NSTextView {
         let full = NSRange(location: 0, length: storage.length)
         var fills: [(NSRange, NSColor)] = []
         var rules: [(NSRange, NSColor)] = []
+        var bars: [(NSRange, CGFloat)] = []
 
         storage.enumerateAttribute(.blockFill, in: full) { value, range, _ in
             if let color = value as? NSColor { fills.append((range, color)) }
@@ -261,7 +262,10 @@ final class MeasuredTextView: NSTextView {
         storage.enumerateAttribute(.blockRule, in: full) { value, range, _ in
             if let color = value as? NSColor { rules.append((range, color)) }
         }
-        guard !fills.isEmpty || !rules.isEmpty else { return }
+        storage.enumerateAttribute(.blockQuoteBar, in: full) { value, range, _ in
+            if let offset = value as? NSNumber { bars.append((range, CGFloat(offset.doubleValue))) }
+        }
+        guard !fills.isEmpty || !rules.isEmpty || !bars.isEmpty else { return }
 
         let originX = textContainerInset.width
         let originY = textContainerInset.height
@@ -271,6 +275,7 @@ final class MeasuredTextView: NSTextView {
         // each decorated range.
         var fillRects = [CGRect?](repeating: nil, count: fills.count)
         var ruleRects = [CGRect?](repeating: nil, count: rules.count)
+        var barRects = [CGRect?](repeating: nil, count: bars.count)
 
         layoutManager.enumerateTextLayoutFragments(
             from: layoutManager.documentRange.location,
@@ -296,6 +301,9 @@ final class MeasuredTextView: NSTextView {
             for (index, entry) in rules.enumerated() where NSIntersectionRange(entry.0, fragmentRange).length > 0 {
                 ruleRects[index] = ruleRects[index].map { $0.union(frame) } ?? frame
             }
+            for (index, entry) in bars.enumerated() where NSIntersectionRange(entry.0, fragmentRange).length > 0 {
+                barRects[index] = barRects[index].map { $0.union(frame) } ?? frame
+            }
             return true
         }
 
@@ -317,6 +325,26 @@ final class MeasuredTextView: NSTextView {
             )
             entry.1.setFill()
             NSBezierPath(roundedRect: rect, xRadius: 8, yRadius: 8).fill()
+        }
+
+        // The quote's last paragraph carries its trailing gap inside its own
+        // fragment, so the bar would otherwise overshoot the final line.
+        for (index, entry) in bars.enumerated() {
+            guard let box = barRects[index] else { continue }
+            let height = box.height - Theme.paragraphGap
+            guard height > 0 else { continue }
+            let rect = CGRect(
+                x: originX + entry.1 + 2,
+                y: box.minY + originY,
+                width: Theme.quoteBarWidth,
+                height: height
+            )
+            Theme.quoteBarColor.setFill()
+            NSBezierPath(
+                roundedRect: rect,
+                xRadius: Theme.quoteBarWidth / 2,
+                yRadius: Theme.quoteBarWidth / 2
+            ).fill()
         }
 
         for (index, entry) in rules.enumerated() {

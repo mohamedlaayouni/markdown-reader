@@ -98,6 +98,14 @@ enum Theme {
 
     static let codeBackground = dynamic(light: "F2F1EE", dark: "26262B")
     static let ruleColor: NSColor = .separatorColor
+    /// The bar down the left of a blockquote.
+    static let quoteBarColor: NSColor = .tertiaryLabelColor
+    static let quoteBarWidth: CGFloat = 2.5
+    /// Indent added per level of quote nesting. The bar sits in this gutter, so
+    /// the two have to agree.
+    static let quoteIndent: CGFloat = 18
+    /// Trailing gap under a paragraph.
+    static let paragraphGap: CGFloat = 12
     static let gutterColor: NSColor = .tertiaryLabelColor
 }
 
