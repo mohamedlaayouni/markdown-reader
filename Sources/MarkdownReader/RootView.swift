@@ -136,7 +136,11 @@ struct RootView: View {
     private var content: NSAttributedString {
         switch settings.mode {
         case .preview:
-            return PreviewRenderer.render(document.text, face: settings.face)
+            return PreviewRenderer.render(
+                document.text,
+                face: settings.face,
+                measure: CGFloat(settings.measure)
+            )
         case .editor:
             return SourceHighlighter.highlight(document.text)
         }
@@ -145,7 +149,9 @@ struct RootView: View {
     /// Changes whenever the installed content should be replaced.
     private var token: String {
         let path = document.url?.path(percentEncoded: false) ?? "none"
-        return "\(path)|\(settings.mode.rawValue)|\(settings.face.rawValue)|\(document.text.count)"
+        // Measure is part of the token because table columns are laid out to fit
+        // it: a width change is a re-render, not just a relayout.
+        return "\(path)|\(settings.mode.rawValue)|\(settings.face.rawValue)|\(document.text.count)|\(Int(settings.measure))"
     }
 
     // MARK: Actions

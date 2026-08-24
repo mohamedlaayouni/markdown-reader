@@ -27,11 +27,18 @@ struct PreviewRenderer: MarkupVisitor {
     typealias Result = NSAttributedString
 
     var face: Theme.BodyFace = .sans
+    /// Width of the text column. Tables need it: their columns are sized to fit
+    /// the content, and the budget they are fitted into is this.
+    var measure: CGFloat = Theme.defaultMeasure
     private var listDepth = 0
     private var quoteDepth = 0
 
-    static func render(_ markdown: String, face: Theme.BodyFace) -> NSAttributedString {
-        var renderer = PreviewRenderer(face: face)
+    static func render(
+        _ markdown: String,
+        face: Theme.BodyFace,
+        measure: CGFloat = Theme.defaultMeasure
+    ) -> NSAttributedString {
+        var renderer = PreviewRenderer(face: face, measure: measure)
         let document = Document(parsing: markdown)
         return renderer.visit(document)
     }
@@ -414,58 +421,152 @@ struct PreviewRenderer: MarkupVisitor {
 
     // MARK: Tables
 
+    /// Gap between the end of one column's text and the start of the next.
+    private static let tableGutter: CGFloat = 20
+    /// A column narrower than this is unreadable, so compression stops here even
+    /// if that means the table is wider than the text column.
+    private static let tableMinColumn: CGFloat = 64
+
+    /// Lays the table out on tab stops sized to the content.
+    ///
+    /// The previous version put every stop at a fixed 150pt. That is wrong in
+    /// both directions at once: a cell longer than 150pt runs straight through
+    /// its stop and shoves the rest of the row one column right - which is how a
+    /// table turns into a paragraph of run-together words - while a column of
+    /// short cells leaves a 100pt hole. Measuring first costs one pass and makes
+    /// both failures impossible.
     mutating func visitTable(_ table: Markdown.Table) -> NSAttributedString {
         let columns = max(table.maxColumnCount, 1)
-        let columnWidth: CGFloat = 150
+
+        let head = cellsOfRow(table.head, columns: columns)
+        for cell in head {
+            let full = NSRange(location: 0, length: cell.length)
+            cell.enumerateAttribute(.font, in: full) { value, range, _ in
+                let size = (value as? NSFont)?.pointSize ?? Theme.bodySize
+                cell.addAttribute(.font, value: Theme.body(face, size: size, weight: .semibold), range: range)
+            }
+        }
+
+        var body: [[NSMutableAttributedString]] = []
+        for row in table.body.children {
+            body.append(cellsOfRow(row, columns: columns))
+        }
+
+        let widths = columnWidths(head: head, body: body, columns: columns)
+
+        // Anything that still does not fit gets an ellipsis rather than being
+        // allowed to run into its neighbour.
+        for index in 0..<columns {
+            let limit = widths[index] - Self.tableGutter
+            truncate(head[index], to: limit)
+            for row in 0..<body.count { truncate(body[row][index], to: limit) }
+        }
 
         let style = NSMutableParagraphStyle()
         style.paragraphSpacingBefore = 12
         style.paragraphSpacing = 2
         style.lineHeightMultiple = 1.24
-        style.tabStops = (1...columns).map {
-            NSTextTab(textAlignment: .left, location: CGFloat($0) * columnWidth)
-        }
         style.firstLineHeadIndent = blockIndent
         style.headIndent = blockIndent
+        var x = blockIndent
+        style.tabStops = widths.dropLast().map { width in
+            x += width
+            return NSTextTab(textAlignment: .left, location: x)
+        }
 
         let out = NSMutableAttributedString()
-        out.append(visit(table.head))
-        out.append(NSAttributedString(string: "\n"))
-        out.append(visit(table.body))
-
+        out.append(joinWithTabs(head))
+        for row in body {
+            out.append(NSAttributedString(string: "\n"))
+            out.append(joinWithTabs(row))
+        }
         out.addAttribute(.paragraphStyle, value: style, range: NSRange(location: 0, length: out.length))
         return out
     }
 
-    mutating func visitTableHead(_ head: Markdown.Table.Head) -> NSAttributedString {
-        let out = rowOfCells(head)
-        out.enumerateAttribute(.font, in: NSRange(location: 0, length: out.length)) { value, range, _ in
-            let size = (value as? NSFont)?.pointSize ?? Theme.bodySize
-            out.addAttribute(.font, value: Theme.body(face, size: size, weight: .semibold), range: range)
-        }
-        return out
-    }
-
-    mutating func visitTableBody(_ body: Markdown.Table.Body) -> NSAttributedString {
-        let out = NSMutableAttributedString()
-        for (index, row) in body.children.enumerated() {
-            if index > 0 { out.append(NSAttributedString(string: "\n")) }
-            out.append(visit(row))
-        }
-        return out
-    }
-
-    mutating func visitTableRow(_ row: Markdown.Table.Row) -> NSAttributedString {
-        rowOfCells(row)
-    }
-
-    private mutating func rowOfCells(_ container: Markup) -> NSMutableAttributedString {
-        let out = NSMutableAttributedString()
-        for (index, cell) in container.children.enumerated() {
-            if index > 0 {
-                out.append(NSAttributedString(string: "\t", attributes: [.font: Theme.body(face, size: Theme.bodySize)]))
+    /// Natural width per column, compressed to the text column when the sum of
+    /// the natural widths overflows it.
+    ///
+    /// Compression is proportional-with-a-floor rather than a flat scale:
+    /// columns that already fit inside an even share keep their exact width, and
+    /// only the greedy ones give space back. A column of one-digit counts should
+    /// not shrink because the column of prose beside it is long.
+    private func columnWidths(
+        head: [NSMutableAttributedString],
+        body: [[NSMutableAttributedString]],
+        columns: Int
+    ) -> [CGFloat] {
+        var natural = [CGFloat](repeating: 0, count: columns)
+        for index in 0..<columns {
+            natural[index] = ceil(head[index].size().width)
+            for row in body {
+                natural[index] = max(natural[index], ceil(row[index].size().width))
             }
-            out.append(visit(cell))
+            natural[index] += Self.tableGutter
+        }
+
+        let budget = max(measure - blockIndent, Self.tableMinColumn * CGFloat(columns))
+        guard natural.reduce(0, +) > budget else { return natural }
+
+        var result = natural
+        var flexible = Set(0..<columns)
+        var remaining = budget
+
+        while !flexible.isEmpty {
+            let share = remaining / CGFloat(flexible.count)
+            let settled = flexible.filter { natural[$0] <= share }
+            guard !settled.isEmpty else {
+                for index in flexible { result[index] = max(share, Self.tableMinColumn) }
+                break
+            }
+            for index in settled {
+                result[index] = natural[index]
+                remaining -= natural[index]
+                flexible.remove(index)
+            }
+        }
+        return result
+    }
+
+    /// Clips `cell` to `limit` points, ending it with an ellipsis.
+    private func truncate(_ cell: NSMutableAttributedString, to limit: CGFloat) {
+        guard limit > 0, cell.length > 0, cell.size().width > limit else { return }
+        while cell.length > 1 {
+            cell.deleteCharacters(in: NSRange(location: cell.length - 1, length: 1))
+            let probe = NSMutableAttributedString(attributedString: cell)
+            probe.append(NSAttributedString(
+                string: "\u{2026}",
+                attributes: cell.attributes(at: probe.length - 1, effectiveRange: nil)
+            ))
+            if probe.size().width <= limit {
+                cell.setAttributedString(probe)
+                return
+            }
+        }
+    }
+
+    private mutating func cellsOfRow(_ container: Markup, columns: Int) -> [NSMutableAttributedString] {
+        var out: [NSMutableAttributedString] = []
+        for cell in container.children {
+            let rendered = NSMutableAttributedString()
+            rendered.append(visit(cell))
+            out.append(rendered)
+        }
+        // Ragged rows are legal markdown; pad so every row has the same stops.
+        while out.count < columns { out.append(NSMutableAttributedString()) }
+        return Array(out.prefix(columns))
+    }
+
+    private func joinWithTabs(_ cells: [NSMutableAttributedString]) -> NSAttributedString {
+        let out = NSMutableAttributedString()
+        for (index, cell) in cells.enumerated() {
+            if index > 0 {
+                out.append(NSAttributedString(
+                    string: "\t",
+                    attributes: [.font: Theme.body(face, size: Theme.bodySize)]
+                ))
+            }
+            out.append(cell)
         }
         return out
     }

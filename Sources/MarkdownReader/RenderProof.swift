@@ -27,7 +27,7 @@ enum RenderProof {
         }
 
         let content: NSAttributedString = switch mode {
-        case .preview: PreviewRenderer.render(markdown, face: .sans)
+        case .preview: PreviewRenderer.render(markdown, face: .sans, measure: measure)
         case .editor: SourceHighlighter.highlight(markdown)
         }
 
