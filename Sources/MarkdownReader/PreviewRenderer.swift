@@ -394,12 +394,17 @@ struct PreviewRenderer: MarkupVisitor {
         }
 
         // A paragraph inside a list item should not add its own trailing gap -
-        // but a filled block must keep its spacing, for the reason above.
+        // but a filled block must keep its spacing, for the reason above, and a
+        // NESTED ROW must keep its indent. Zeroing the indent here unconditionally
+        // is what flattened sub-lists onto their parent's left edge: the nested
+        // row had already set the deeper indent, and this ran afterwards and
+        // erased it. Tab stops are the tell - only a row or a table sets them.
         let full = NSRange(location: 0, length: out.length)
         out.enumerateAttribute(.blockFill, in: full) { fill, fillRange, _ in
             guard fill == nil else { return }
             out.enumerateAttribute(.paragraphStyle, in: fillRange) { value, range, _ in
                 guard let existing = value as? NSParagraphStyle,
+                      existing.tabStops.isEmpty,
                       let mutable = existing.mutableCopy() as? NSMutableParagraphStyle else { return }
                 mutable.paragraphSpacing = 0
                 mutable.firstLineHeadIndent = 0
@@ -410,12 +415,23 @@ struct PreviewRenderer: MarkupVisitor {
         return out
     }
 
-    /// Sets `style` on every part of `text` that is not inside a painted block.
+    /// Sets `style` on every part of `text` that is not inside a painted block
+    /// and has not already been indented further by a deeper level.
+    ///
+    /// The second condition is what lets sub-lists nest. A parent row applies its
+    /// style to everything it contains, and everything it contains includes any
+    /// list nested inside it - so without this the sub-list is dragged back out
+    /// to the parent's indent and the nesting becomes invisible.
     private func applySkippingFilledBlocks(_ style: NSParagraphStyle, to text: NSMutableAttributedString) {
         let full = NSRange(location: 0, length: text.length)
         text.enumerateAttribute(.blockFill, in: full) { fill, range, _ in
             guard fill == nil else { return }
-            text.addAttribute(.paragraphStyle, value: style, range: range)
+            text.enumerateAttribute(.paragraphStyle, in: range) { value, inner, _ in
+                if let existing = value as? NSParagraphStyle, existing.headIndent > style.headIndent {
+                    return
+                }
+                text.addAttribute(.paragraphStyle, value: style, range: inner)
+            }
         }
     }
 
