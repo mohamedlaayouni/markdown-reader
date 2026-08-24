@@ -17,6 +17,16 @@ enum Theme {
 
     static let bodySize: CGFloat = 15.5
     static let bodyLineHeightMultiple: CGFloat = 1.30
+
+    /// Heading sizes, h1 through h6.
+    ///
+    /// Every level stays above `bodySize`. A heading that renders at or below
+    /// the size of the text it introduces stops being a heading - it reads as
+    /// bold body text, and the document can no longer be understood by scanning.
+    /// The steps shrink as the level deepens (1.28, 1.19, 1.14, 1.09, 1.06)
+    /// because the top levels need to carve the page while the bottom ones only
+    /// need to be tellable apart from their neighbour.
+    static let headingSizes: [CGFloat] = [32, 25, 21, 18.5, 17, 16]
     static let monoSize: CGFloat = 13
     static let sourceSize: CGFloat = 13.5
     static let sourceLineHeightMultiple: CGFloat = 1.42

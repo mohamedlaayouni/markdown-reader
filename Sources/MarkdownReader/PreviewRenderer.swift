@@ -117,8 +117,7 @@ struct PreviewRenderer: MarkupVisitor {
     }
 
     mutating func visitHeading(_ heading: Heading) -> NSAttributedString {
-        let sizes: [CGFloat] = [33, 20, 15.5, 14.5, 13.5, 12.5]
-        let size = sizes[min(max(heading.level, 1), 6) - 1]
+        let size = Theme.headingSizes[min(max(heading.level, 1), 6) - 1]
         let weight: NSFont.Weight = heading.level == 1 ? .bold : .semibold
 
         let out = joinChildren(heading)
