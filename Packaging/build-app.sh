@@ -10,8 +10,8 @@ set -euo pipefail
 APP_NAME="Markdown Reader"
 EXECUTABLE="MarkdownReader"
 BUNDLE_ID="com.local.markdownreader"
-VERSION="1.0"
-BUILD="1"
+VERSION="1.1"
+BUILD="5"
 MIN_MACOS="26.0"
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -31,9 +31,14 @@ for arg in "$@"; do
   esac
 done
 
+# Build against the stable Tahoe SDK when beta Command Line Tools are selected.
+# READER_SDK can override this for another installed toolchain.
+READER_SDK="${READER_SDK:-/Library/Developer/CommandLineTools/SDKs/MacOSX26.5.sdk}"
+if [ ! -d "$READER_SDK" ]; then READER_SDK="$(xcrun --sdk macosx --show-sdk-path)"; fi
+export CLANG_MODULE_CACHE_PATH="${CLANG_MODULE_CACHE_PATH:-$ROOT/.build/ModuleCache}"
 echo "==> Compiling (release)"
-swift build -c release
-BINARY="$(swift build -c release --show-bin-path)/$EXECUTABLE"
+swift build --build-system native -c release --sdk "$READER_SDK"
+BINARY="$(swift build --build-system native -c release --sdk "$READER_SDK" --show-bin-path)/$EXECUTABLE"
 [ -x "$BINARY" ] || { echo "no binary at $BINARY" >&2; exit 1; }
 
 echo "==> Assembling bundle"
@@ -44,7 +49,7 @@ cp "$BINARY" "$CONTENTS/MacOS/$EXECUTABLE"
 echo "==> Icon"
 ICONSET="$(mktemp -d)/icon.iconset"
 mkdir -p "$ICONSET"
-swift "$ROOT/Packaging/makeicon.swift" "$ICONSET/base.png"
+swift -sdk "$READER_SDK" "$ROOT/Packaging/makeicon.swift" "$ICONSET/base.png"
 for size in 16 32 128 256 512; do
   sips -z $size $size "$ICONSET/base.png" --out "$ICONSET/icon_${size}x${size}.png" >/dev/null
   double=$((size * 2))

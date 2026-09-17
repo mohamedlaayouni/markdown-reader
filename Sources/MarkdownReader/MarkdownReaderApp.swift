@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 import UniformTypeIdentifiers
 
@@ -9,6 +10,11 @@ struct AppActions {
     var toggleSidebar: () -> Void = {}
     var canSave = false
     var hasDocument = false
+    var quickOpen: () -> Void = {}
+    var find: (NSTextFinder.Action) -> Void = { _ in }
+    var reveal: () -> Void = {}
+    var saveAs: () -> Void = {}
+    var reloadImages: () -> Void = {}
 }
 
 private struct AppActionsKey: FocusedValueKey {
@@ -35,19 +41,28 @@ struct MarkdownReaderApp: App {
         Window("Markdown Reader", id: "main") {
             RootView(settings: settings, library: library, document: document)
                 .frame(minWidth: 720, minHeight: 480)
-                .preferredColorScheme(settings.appearance.colorScheme)
         }
         .defaultSize(width: 1080, height: 720)
         .commands {
+            CommandGroup(after: .textEditing) {
+                Menu("Find") {
+                    Button("Find…") { actions?.find(.showFindInterface) }.keyboardShortcut("f")
+                    Button("Find Next") { actions?.find(.nextMatch) }.keyboardShortcut("g")
+                    Button("Find Previous") { actions?.find(.previousMatch) }.keyboardShortcut("g", modifiers: [.command, .shift])
+                }.disabled(!(actions?.hasDocument ?? false))
+            }
             CommandGroup(replacing: .newItem) {
                 Button("Open\u{2026}") { actions?.openFiles() }
                     .keyboardShortcut("o", modifiers: .command)
+                Button("Quick Open…") { actions?.quickOpen() }.keyboardShortcut("k", modifiers: .command)
+                Button("Show in Finder") { actions?.reveal() }.disabled(!(actions?.hasDocument ?? false))
             }
 
             CommandGroup(replacing: .saveItem) {
                 Button("Save") { actions?.save() }
                     .keyboardShortcut("s", modifiers: .command)
                     .disabled(!(actions?.canSave ?? false))
+                Button("Save As…") { actions?.saveAs() }.keyboardShortcut("s", modifiers: [.command, .shift]).disabled(!(actions?.hasDocument ?? false))
             }
 
             // Items go INTO the standard View menu. Declaring
@@ -66,6 +81,12 @@ struct MarkdownReaderApp: App {
 
                 Divider()
 
+                Button("Increase Text Size") { settings.textSize = min(settings.textSize + 1, 28) }.keyboardShortcut("+")
+                Button("Increase Text Size") { settings.textSize = min(settings.textSize + 1, 28) }.keyboardShortcut("=").hidden()
+                Button("Decrease Text Size") { settings.textSize = max(settings.textSize - 1, 12) }.keyboardShortcut("-")
+                Button("Reset Reading Defaults") { settings.preset("Comfort") }.keyboardShortcut("0")
+                Button("Reload Images") { actions?.reloadImages() }.disabled(!(actions?.hasDocument ?? false))
+                Divider()
                 Button("Wider Text") {
                     settings.measure = min(settings.measure + 40, Double(Theme.measureRange.upperBound))
                 }
@@ -80,7 +101,6 @@ struct MarkdownReaderApp: App {
 
         Settings {
             SettingsView(settings: settings)
-                .preferredColorScheme(settings.appearance.colorScheme)
         }
     }
 }

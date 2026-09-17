@@ -1,34 +1,41 @@
 import AppKit
 import SwiftUI
 
-/// The single text engine behind both modes.
+/// The source editor: a TextKit 2 `NSTextView` showing highlighted markdown.
 ///
-/// Preview and Editor are not two views. They are one TextKit 2 `NSTextView`
-/// with a different attributed string installed, which is what makes the toggle
-/// cheap, keeps one implementation of selection / Find / Writing Tools, and lets
-/// scroll position carry across the switch.
+/// Preview lives in `PreviewWebPane`. The two share source lines as their
+/// coordinate, so the place you were reading is the place you start editing.
 struct MarkdownTextPane: NSViewRepresentable {
     let mode: ViewMode
-    /// Rendered preview attributes, or highlighted source, depending on `mode`.
-    let content: NSAttributedString
+    /// Highlighted source.
+    let content: () -> NSAttributedString
     let measure: CGFloat
     /// Identifies which document/mode the content belongs to, so the coordinator
     /// can tell a genuine content swap from a redraw.
     let contentToken: String
     let onEdit: (String) -> Void
-    /// A task-list checkbox was clicked; the argument is its 1-based source line.
-    let onToggleTask: (Int) -> Void
+    /// Distance scrolled from the top, in points. The toolbar's material is
+    /// keyed off this: transparent at rest, glass once text is about to slide
+    /// under it.
+    var onScroll: (CGFloat) -> Void = { _ in }
+
+    var contentStyleToken = ""
+    var documentKey = ""
+    var source = ""
+    var navigation: ReaderNavigation? = nil
+    var textScale: Double = 1
+    var onFeedback: (String) -> Void = { _ in }
+    var history: UndoManager? = nil
 
     func makeCoordinator() -> Coordinator {
-        Coordinator(onEdit: onEdit, onToggleTask: onToggleTask)
+        Coordinator(onEdit: onEdit)
     }
 
     func makeNSView(context: Context) -> NSScrollView {
         let textView = MeasuredTextView(usingTextLayoutManager: true)
-        textView.disableDefaultLinkChrome()
         textView.delegate = context.coordinator
         textView.isRichText = false
-        textView.allowsUndo = true
+        textView.allowsUndo = false
         textView.isAutomaticQuoteSubstitutionEnabled = false
         textView.isAutomaticDashSubstitutionEnabled = false
         textView.isAutomaticTextReplacementEnabled = false
@@ -51,11 +58,10 @@ struct MarkdownTextPane: NSViewRepresentable {
         scrollView.drawsBackground = false
         scrollView.autohidesScrollers = true
 
-        textView.onTaskToggle = { [weak coordinator = context.coordinator] line in
-            coordinator?.onToggleTask(line)
-        }
-
         context.coordinator.textView = textView
+        context.coordinator.onScroll = onScroll
+        context.coordinator.observeScrolling(of: scrollView)
+        configure(context.coordinator)
         context.coordinator.install(content, mode: mode, token: contentToken)
         return scrollView
     }
@@ -63,13 +69,30 @@ struct MarkdownTextPane: NSViewRepresentable {
     func updateNSView(_ scrollView: NSScrollView, context: Context) {
         guard let textView = scrollView.documentView as? MeasuredTextView else { return }
         context.coordinator.onEdit = onEdit
-        context.coordinator.onToggleTask = onToggleTask
+        context.coordinator.onScroll = onScroll
 
         if textView.measure != measure {
             textView.measure = measure
             textView.needsLayout = true
         }
+        configure(context.coordinator)
         context.coordinator.install(content, mode: mode, token: contentToken)
+    }
+
+    /// The pane is going away (a mode switch): write the reading position now
+    /// rather than waiting for the debounce, so the preview picks it up.
+    static func dismantleNSView(_ scrollView: NSScrollView, coordinator: Coordinator) {
+        coordinator.rememberPosition()
+    }
+
+    private func configure(_ coordinator: Coordinator) {
+        coordinator.textView?.history = history
+        coordinator.incomingStyle = contentStyleToken
+        coordinator.incomingKey = documentKey
+        coordinator.incomingSource = source
+        coordinator.textScale = textScale
+        coordinator.onFeedback = onFeedback
+        if let navigation { coordinator.navigation = navigation }
     }
 
     // MARK: Coordinator
@@ -77,8 +100,94 @@ struct MarkdownTextPane: NSViewRepresentable {
     @MainActor
     final class Coordinator: NSObject, NSTextViewDelegate {
         var onEdit: (String) -> Void
-        var onToggleTask: (Int) -> Void
+        var onScroll: (CGFloat) -> Void = { _ in }
         weak var textView: MeasuredTextView?
+        var incomingStyle = ""
+        private var installedStyle = ""
+        private var installedSource = ""
+        var incomingKey = ""
+        var incomingSource = ""
+        var textScale: Double = 1
+        var onFeedback: (String) -> Void = { _ in }
+        /// A jump requested before this pane existed belongs to the pane that
+        /// was showing then; only later requests are acted on.
+        var navigation: ReaderNavigation? {
+            didSet { if oldValue == nil, let navigation { lastJump = navigation.jumpID; lastFind = navigation.findID } }
+        }
+        private var activeKey = ""
+        private var lastJump: UUID?
+        private var lastFind: UUID?
+        private var restoring = false
+        private var positionSaveTask: Task<Void, Never>?
+
+        private func line(at index: Int) -> Int {
+            guard let textView else { return 1 }
+            let prefix = (textView.string as NSString).substring(to: min(max(0, index), (textView.string as NSString).length))
+            return prefix.reduce(1) { $1 == "\n" ? $0 + 1 : $0 }
+        }
+        private func visibleLine() -> Int {
+            guard let view = textView, let clip = view.enclosingScrollView?.contentView else { return 1 }
+            return line(at: view.characterIndexForInsertion(at: NSPoint(x: view.textContainerInset.width + 2, y: clip.bounds.minY + 8)))
+        }
+        func rememberPosition() {
+            guard !restoring, !activeKey.isEmpty else { return }
+            var positions = UserDefaults.standard.dictionary(forKey: "readingLines") as? [String: Int] ?? [:]
+            let line = visibleLine()
+            guard positions[activeKey] != line else { return }
+            positions[activeKey] = line
+            UserDefaults.standard.set(positions, forKey: "readingLines")
+        }
+        private func index(for line: Int) -> Int {
+            guard let view = textView else { return 0 }
+            var offset = 0
+            for (n, part) in view.string.components(separatedBy: "\n").enumerated() {
+                if n + 1 >= line { return offset }
+                offset += (part as NSString).length + 1
+            }
+            return (view.string as NSString).length
+        }
+        func go(to line: Int, caret: Bool) {
+            guard let view = textView else { return }
+            let location = index(for: line)
+            let range = NSRange(location: location, length: 0)
+            view.layoutSubtreeIfNeeded()
+            view.scrollRangeToVisible(range)
+            if caret { view.setSelectedRange(range) }
+            guard let clip = view.enclosingScrollView?.contentView,
+                  let manager = view.textLayoutManager,
+                  let contentManager = manager.textContentManager else { return }
+            // Use TextKit document coordinates. firstRect(forCharacterRange:)
+            // is a screen-space IME API and can return zero for offscreen text.
+            var targetY: CGFloat = 0
+            if line > 1 {
+                manager.enumerateTextLayoutFragments(from: manager.documentRange.location, options: [.ensuresLayout]) { fragment in
+                    let end = contentManager.offset(from: manager.documentRange.location, to: fragment.rangeInElement.endLocation)
+                    targetY = fragment.layoutFragmentFrame.minY + view.textContainerInset.height - 12
+                    return end <= location
+                }
+            }
+            clip.scroll(to: NSPoint(x: 0, y: max(0, targetY)))
+            view.enclosingScrollView?.reflectScrolledClipView(clip)
+        }
+        private func processNavigation() {
+            guard let navigation, let view = textView else { return }
+            if lastJump != navigation.jumpID, let line = navigation.jumpLine {
+                lastJump = navigation.jumpID
+                go(to: line, caret: true)
+                view.window?.makeFirstResponder(view)
+            }
+            if lastFind != navigation.findID, let action = navigation.findAction {
+                lastFind = navigation.findID
+                view.window?.makeFirstResponder(view)
+                let item = NSMenuItem(); item.tag = action
+                view.performTextFinderAction(item)
+            }
+        }
+
+        // `nonisolated(unsafe)` only so `deinit` can hand it back to the
+        // notification center: it is written once, on the main actor, and read
+        // nowhere else.
+        nonisolated(unsafe) private var scrollObserver: (any NSObjectProtocol)?
 
         private var installedToken: String?
         /// Guards against the delegate callback re-entering during a programmatic swap.
@@ -89,64 +198,89 @@ struct MarkdownTextPane: NSViewRepresentable {
         /// `content`. Without this flag `install()` cannot tell that apart from a
         /// genuine external change, replaces the storage wholesale on every
         /// keystroke, and the caret gets discarded in the process - which is the
-        /// "cursor jumps to the end" bug. Only consumed while still in Editor
-        /// mode: a mode switch that lands in the same render must still reinstall.
+        /// "cursor jumps to the end" bug.
         private var pendingLocalEdit = false
 
-        init(onEdit: @escaping (String) -> Void, onToggleTask: @escaping (Int) -> Void = { _ in }) {
+        init(onEdit: @escaping (String) -> Void) {
             self.onEdit = onEdit
-            self.onToggleTask = onToggleTask
+        }
+
+        deinit { if let scrollObserver { NotificationCenter.default.removeObserver(scrollObserver) } }
+
+        /// Report the clip view's offset as the reader scrolls.
+        ///
+        /// Bounds-change notifications rather than a `NSScrollView` delegate:
+        /// they fire for programmatic scrolls and Find-bar jumps too, not only
+        /// for the wheel, so the toolbar cannot get stuck in the wrong state.
+        func observeScrolling(of scrollView: NSScrollView) {
+            let clip = scrollView.contentView
+            clip.postsBoundsChangedNotifications = true
+            scrollObserver = NotificationCenter.default.addObserver(
+                forName: NSView.boundsDidChangeNotification,
+                object: clip,
+                queue: .main
+            ) { [weak self, weak clip] _ in
+                guard let self, let clip else { return }
+                // The queue is `.main`, so this is the main actor - but the
+                // notification block's signature does not say so.
+                MainActor.assumeIsolated {
+                    self.onScroll(max(0, clip.bounds.origin.y))
+                    self.positionSaveTask?.cancel()
+                    self.positionSaveTask = Task { [weak self] in
+                        try? await Task.sleep(for: .milliseconds(300))
+                        guard !Task.isCancelled else { return }
+                        self?.rememberPosition()
+                    }
+                }
+            }
         }
 
         /// Swap in a new attributed string, preserving the reader's place.
         func install(_ content: NSAttributedString, mode: ViewMode, token: String) {
-            guard let textView else { return }
+            install({ content }, mode: mode, token: token)
+        }
 
+        func install(_ makeContent: () -> NSAttributedString, mode: ViewMode, token: String) {
+            guard let textView else { return }
             if pendingLocalEdit {
                 pendingLocalEdit = false
-                if mode == .editor {
-                    // Storage already matches; touching it would only cost us the
-                    // caret position the user just typed their way into.
+                if activeKey == incomingKey && textView.string == incomingSource {
                     installedToken = token
-                    return
+                    processNavigation(); return
                 }
             }
-
-            guard installedToken != token else { return }
-
-            let fraction = scrollFraction(of: textView)
-
-            isInstalling = true
+            guard installedToken != token else { processNavigation(); return }
+            let content = makeContent()
+            rememberPosition()
+            let changedFile = activeKey != incomingKey
+            let position = changedFile
+                ? ((UserDefaults.standard.dictionary(forKey: "readingLines") as? [String: Int])?[incomingKey] ?? 1)
+                : visibleLine()
+            let previousSelection = textView.selectedRange()
+            isInstalling = true; restoring = true
+            installedSource = incomingSource; installedStyle = incomingStyle
+            let previousOffset = textView.enclosingScrollView?.contentView.bounds.origin
             textView.textStorage?.setAttributedString(content)
-            textView.isEditable = (mode == .editor)
+            textView.isEditable = mode == .editor
             textView.isSelectable = true
-            isInstalling = false
-
-            installedToken = token
+            textView.setAccessibilityLabel("Markdown source")
+            activeKey = incomingKey
+            installedToken = token; isInstalling = false
             textView.needsDisplay = true
-
-            // The two representations differ in length, so an absolute offset is
-            // meaningless across the switch. Proportional restore keeps you in
-            // roughly the same part of the document; a source-line map would make
-            // it exact and is the natural next step.
-            restore(fraction: fraction, in: textView)
-        }
-
-        private func scrollFraction(of textView: NSTextView) -> CGFloat {
-            guard let clip = textView.enclosingScrollView?.contentView else { return 0 }
-            guard textView.bounds.height > clip.bounds.height else { return 0 }
-            let travel = max(textView.bounds.height - clip.bounds.height, 1)
-            return max(0, min(1, clip.bounds.origin.y / travel))
-        }
-
-        private func restore(fraction: CGFloat, in textView: NSTextView) {
-            guard fraction > 0, let scrollView = textView.enclosingScrollView else { return }
-            DispatchQueue.main.async {
-                let clip = scrollView.contentView
-                let travel = max(textView.bounds.height - clip.bounds.height, 0)
-                guard travel > 0 else { return }
-                clip.scroll(to: NSPoint(x: 0, y: travel * fraction))
-                scrollView.reflectScrolledClipView(clip)
+            if changedFile {
+                textView.setSelectedRange(NSRange(location: index(for: position), length: 0))
+            } else {
+                textView.setSelectedRange(NSRange(location: min(previousSelection.location, content.length), length: 0))
+            }
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.installedToken == token else { return }
+                if !changedFile, let offset = previousOffset, let clip = self.textView?.enclosingScrollView?.contentView {
+                    self.textView?.layoutSubtreeIfNeeded()
+                    clip.scroll(to: clip.constrainBoundsRect(NSRect(origin: offset, size: clip.bounds.size)).origin)
+                    self.textView?.enclosingScrollView?.reflectScrolledClipView(clip)
+                } else { self.go(to: position, caret: false) }
+                self.restoring = false
+                self.processNavigation()
             }
         }
 
@@ -166,6 +300,13 @@ struct MarkdownTextPane: NSViewRepresentable {
 
             // The next `install()` call will just be this same edit reflected
             // back down through SwiftUI - see `pendingLocalEdit`.
+            if textScale != 1 {
+                let range = (storage.string as NSString).lineRange(for: NSRange(location: min(caret.location, storage.length), length: 0))
+                let scaled = storage.attributedSubstring(from: range).scaledFonts(by: textScale)
+                scaled.enumerateAttribute(.font, in: NSRange(location: 0, length: scaled.length)) { value, local, _ in
+                    if let value { storage.addAttribute(.font, value: value, range: NSRange(location: range.location + local.location, length: local.length)) }
+                }
+            }
             pendingLocalEdit = true
             onEdit(storage.string)
         }
@@ -174,53 +315,36 @@ struct MarkdownTextPane: NSViewRepresentable {
 
 // MARK: - Text view
 
-/// Keeps the text column at `measure` points wide and centred, and paints the
-/// block decorations that attributed strings cannot express.
+/// Keeps the text column at `measure` points wide and centred, and routes
+/// Undo to the document's history rather than the view's own.
 final class MeasuredTextView: NSTextView {
+    var history: UndoManager?
+    override var undoManager: UndoManager? { history ?? super.undoManager }
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        if event.modifierFlags.contains(.command), event.charactersIgnoringModifiers?.lowercased() == "z", let history {
+            if event.modifierFlags.contains(.shift) { history.redo() } else { history.undo() }
+            return true
+        }
+        return super.performKeyEquivalent(with: event)
+    }
+
     var measure: CGFloat = Theme.defaultMeasure {
         didSet { if measure != oldValue { needsLayout = true } }
     }
 
-    /// Called when a task-list checkbox is clicked, with its 1-based source line.
-    var onTaskToggle: ((Int) -> Void)?
-
-    /// `NSTextView.linkTextAttributes` has a system default (blue + underline)
-    /// that overrides whatever color/underline a run already carries - which is
-    /// what made task-checkbox links (styled explicitly, on purpose, to look
-    /// like checkboxes rather than links) render with a blue underline anyway.
-    /// Clearing it puts styling back in the renderer's hands: real markdown
-    /// links keep their look because `PreviewRenderer.visitLink` sets color and
-    /// underline explicitly on those runs.
-    ///
-    /// `NSTextView(usingTextLayoutManager:)` is a convenience initializer that
-    /// cannot be overridden, so this is applied at each construction site
-    /// instead of in an initializer.
-    func disableDefaultLinkChrome() {
-        linkTextAttributes = [:]
+    @objc func undo(_ sender: Any?) { history?.undo() }
+    @objc func redo(_ sender: Any?) { history?.redo() }
+    override func doCommand(by selector: Selector) {
+        if selector == NSSelectorFromString("undo:"), let history { history.undo(); return }
+        if selector == NSSelectorFromString("redo:"), let history { history.redo(); return }
+        super.doCommand(by: selector)
     }
-
-    /// Intercepts clicks on task-list checkboxes before the text view treats
-    /// them as a selection gesture.
-    ///
-    /// `characterIndexForInsertion` returns the nearest insertion point, which
-    /// for a single-glyph checkbox can land on either side of it - so both the
-    /// index and the one before it are checked.
-    override func mouseDown(with event: NSEvent) {
-        guard !isEditable, let storage = textStorage, storage.length > 0 else {
-            super.mouseDown(with: event)
+    override func keyDown(with event: NSEvent) {
+        if event.modifierFlags.contains(.command), event.charactersIgnoringModifiers?.lowercased() == "z", let history {
+            if event.modifierFlags.contains(.shift) { history.redo() } else { history.undo() }
             return
         }
-
-        let point = convert(event.locationInWindow, from: nil)
-        let index = characterIndexForInsertion(at: point)
-
-        for candidate in [index, index - 1] where candidate >= 0 && candidate < storage.length {
-            if let line = storage.attribute(.taskToggleLine, at: candidate, effectiveRange: nil) as? Int {
-                onTaskToggle?(line)
-                return
-            }
-        }
-        super.mouseDown(with: event)
+        super.keyDown(with: event)
     }
 
     override func layout() {
@@ -231,132 +355,9 @@ final class MeasuredTextView: NSTextView {
         if abs(textContainerInset.width - side) > 0.5 || textContainerInset.height != Theme.textInset.height {
             textContainerInset = NSSize(width: side, height: Theme.textInset.height)
         }
-        textContainer?.containerSize = NSSize(width: column, height: .greatestFiniteMagnitude)
+        if textContainer?.containerSize.width != column {
+            textContainer?.containerSize = NSSize(width: column, height: .greatestFiniteMagnitude)
+        }
         super.layout()
-    }
-
-    override func drawBackground(in rect: NSRect) {
-        super.drawBackground(in: rect)
-        drawBlockDecorations(clip: rect)
-    }
-
-    /// Paints code-block grounds and horizontal rules.
-    ///
-    /// Both need to span the text column regardless of how long the text on each
-    /// line is, which is precisely what a glyph-run attribute cannot do.
-    private func drawBlockDecorations(clip: NSRect) {
-        guard let storage = textStorage, storage.length > 0,
-              let layoutManager = textLayoutManager,
-              let contentManager = layoutManager.textContentManager,
-              let container = textContainer
-        else { return }
-
-        let full = NSRange(location: 0, length: storage.length)
-        var fills: [(NSRange, NSColor)] = []
-        var rules: [(NSRange, NSColor)] = []
-        var bars: [(NSRange, CGFloat)] = []
-
-        storage.enumerateAttribute(.blockFill, in: full) { value, range, _ in
-            if let color = value as? NSColor { fills.append((range, color)) }
-        }
-        storage.enumerateAttribute(.blockRule, in: full) { value, range, _ in
-            if let color = value as? NSColor { rules.append((range, color)) }
-        }
-        storage.enumerateAttribute(.blockQuoteBar, in: full) { value, range, _ in
-            if let offset = value as? NSNumber { bars.append((range, CGFloat(offset.doubleValue))) }
-        }
-        guard !fills.isEmpty || !rules.isEmpty || !bars.isEmpty else { return }
-
-        let originX = textContainerInset.width
-        let originY = textContainerInset.height
-        let width = container.size.width
-
-        // One pass over the laid-out fragments, accumulating the union rect of
-        // each decorated range.
-        var fillRects = [CGRect?](repeating: nil, count: fills.count)
-        var ruleRects = [CGRect?](repeating: nil, count: rules.count)
-        var barRects = [CGRect?](repeating: nil, count: bars.count)
-
-        layoutManager.enumerateTextLayoutFragments(
-            from: layoutManager.documentRange.location,
-            options: [.ensuresLayout]
-        ) { fragment in
-            let frame = fragment.layoutFragmentFrame
-            if frame.minY + originY > clip.maxY { return false }
-            if frame.maxY + originY < clip.minY { return true }
-
-            let start = contentManager.offset(
-                from: layoutManager.documentRange.location,
-                to: fragment.rangeInElement.location
-            )
-            let end = contentManager.offset(
-                from: layoutManager.documentRange.location,
-                to: fragment.rangeInElement.endLocation
-            )
-            let fragmentRange = NSRange(location: start, length: max(end - start, 0))
-
-            for (index, entry) in fills.enumerated() where NSIntersectionRange(entry.0, fragmentRange).length > 0 {
-                fillRects[index] = fillRects[index].map { $0.union(frame) } ?? frame
-            }
-            for (index, entry) in rules.enumerated() where NSIntersectionRange(entry.0, fragmentRange).length > 0 {
-                ruleRects[index] = ruleRects[index].map { $0.union(frame) } ?? frame
-            }
-            for (index, entry) in bars.enumerated() where NSIntersectionRange(entry.0, fragmentRange).length > 0 {
-                barRects[index] = barRects[index].map { $0.union(frame) } ?? frame
-            }
-            return true
-        }
-
-        // The block's first and last lines carry `codeBlockOuterGap` as paragraph
-        // spacing, and that spacing is part of their fragment frames. Trim it back
-        // off so the visible padding is `codeBlockInnerPadding`, not the sum.
-        let trim = Theme.codeBlockOuterGap - Theme.codeBlockInnerPadding
-
-        for (index, entry) in fills.enumerated() {
-            guard let box = fillRects[index] else { continue }
-            let top = box.minY + trim
-            let bottom = box.maxY - trim
-            guard bottom > top else { continue }
-            let rect = CGRect(
-                x: originX,
-                y: top + originY,
-                width: width,
-                height: bottom - top
-            )
-            entry.1.setFill()
-            NSBezierPath(roundedRect: rect, xRadius: 8, yRadius: 8).fill()
-        }
-
-        // The quote's last paragraph carries its trailing gap inside its own
-        // fragment, so the bar would otherwise overshoot the final line.
-        for (index, entry) in bars.enumerated() {
-            guard let box = barRects[index] else { continue }
-            let height = box.height - Theme.paragraphGap
-            guard height > 0 else { continue }
-            let rect = CGRect(
-                x: originX + entry.1 + 2,
-                y: box.minY + originY,
-                width: Theme.quoteBarWidth,
-                height: height
-            )
-            Theme.quoteBarColor.setFill()
-            NSBezierPath(
-                roundedRect: rect,
-                xRadius: Theme.quoteBarWidth / 2,
-                yRadius: Theme.quoteBarWidth / 2
-            ).fill()
-        }
-
-        for (index, entry) in rules.enumerated() {
-            guard let box = ruleRects[index] else { continue }
-            let rect = CGRect(
-                x: originX,
-                y: (box.midY + originY).rounded(),
-                width: width,
-                height: 1
-            )
-            entry.1.setFill()
-            rect.fill()
-        }
     }
 }

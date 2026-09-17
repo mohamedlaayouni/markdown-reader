@@ -45,7 +45,7 @@ def handle_user_data_and_send_notification(event, context):
 
 > Naming is the cheapest documentation you will ever write.
 
-- [x] Adopt the prefix table
+- [ ] Adopt the prefix table
 - [ ] Backfill existing functions
 
 Read the [AWS Lambda docs](https://docs.aws.amazon.com/lambda/) for the full runtime contract.

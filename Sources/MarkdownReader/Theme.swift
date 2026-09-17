@@ -14,7 +14,7 @@ enum Theme {
     /// old 620pt floor meant the "Narrow" end of the slider was still ~86. The
     /// range now reaches a real book measure at the bottom and keeps the wide
     /// end for anyone who wants it.
-    static let defaultMeasure: CGFloat = 720
+    static let defaultMeasure: CGFloat = 560
     static let measureRange: ClosedRange<CGFloat> = 480...1040
 
     static let bodySize: CGFloat = 15.5
@@ -23,28 +23,11 @@ enum Theme {
     /// next one. At 1.30 across a 100+ character line, it was losing its place.
     static let bodyLineHeightMultiple: CGFloat = 1.50
 
-    /// Heading sizes, h1 through h6.
-    ///
-    /// Every level stays above `bodySize`. A heading that renders at or below
-    /// the size of the text it introduces stops being a heading - it reads as
-    /// bold body text, and the document can no longer be understood by scanning.
-    /// The steps shrink as the level deepens (1.28, 1.19, 1.14, 1.09, 1.06)
-    /// because the top levels need to carve the page while the bottom ones only
-    /// need to be tellable apart from their neighbour.
-    static let headingSizes: [CGFloat] = [32, 25, 21, 18.5, 17, 16]
     static let monoSize: CGFloat = 13
     static let sourceSize: CGFloat = 13.5
     static let sourceLineHeightMultiple: CGFloat = 1.42
 
     static let textInset = NSSize(width: 34, height: 32)
-
-    /// Gap above and below a fenced code block. Applied as paragraph spacing on
-    /// the block's first and last lines, which means it lands INSIDE the line
-    /// fragment - so `MeasuredTextView` subtracts it back out when painting the
-    /// block ground. Changing one without the other misaligns the fill.
-    static let codeBlockOuterGap: CGFloat = 22
-    /// Padding between the block ground's edge and the code itself.
-    static let codeBlockInnerPadding: CGFloat = 9
 
     // MARK: Fonts
 
@@ -80,6 +63,15 @@ enum Theme {
 
     // MARK: Syntax palette
 
+    /// A translucent overlay whose alpha differs between appearances. Black
+    /// over light, white over dark - the same trick a material uses.
+    private static func layer(light: CGFloat, dark: CGFloat) -> NSColor {
+        NSColor(name: nil) { appearance in
+            let isDark = appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+            return isDark ? NSColor(white: 1, alpha: dark) : NSColor(white: 0, alpha: light)
+        }
+    }
+
     private static func dynamic(light: String, dark: String) -> NSColor {
         NSColor(name: nil) { appearance in
             let isDark = appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
@@ -96,17 +88,22 @@ enum Theme {
     static let synKeyword  = dynamic(light: "A03A96", dark: "DE8ED6")
     static let synFunction = dynamic(light: "10648F", dark: "63AEDA")
 
-    static let codeBackground = dynamic(light: "F2F1EE", dark: "26262B")
-    static let ruleColor: NSColor = .separatorColor
-    /// The bar down the left of a blockquote.
-    static let quoteBarColor: NSColor = .tertiaryLabelColor
-    static let quoteBarWidth: CGFloat = 2.5
-    /// Indent added per level of quote nesting. The bar sits in this gutter, so
-    /// the two have to agree.
-    static let quoteIndent: CGFloat = 18
-    /// Trailing gap under a paragraph.
-    static let paragraphGap: CGFloat = 12
-    static let gutterColor: NSColor = .tertiaryLabelColor
+    // MARK: Sidebar
+
+    static let sidebarWidth: CGFloat = 262
+    /// Ground under an unselected row the pointer is over. Unselected rows had
+    /// no hover state at all; the row only acknowledged you after the click.
+    static let sidebarRowHover: NSColor = layer(light: 0.035, dark: 0.07)
+    /// `List(selection:)`'s own highlight is a solid accent fill - correct for
+    /// an ordinary list, wrong for a reference library where the row's own
+    /// content (the glyph, the missing-file amber) needs to stay legible
+    /// through it. Applied as the List's `.tint()`, which is what actually
+    /// drives its selection color on macOS, rather than as a background this
+    /// spec would just paint over.
+    static let sidebarSelectionTint: NSColor = layer(light: 0.065, dark: 0.13)
+    /// A reference whose file no longer resolves. Amber, not red: the row is
+    /// recoverable through Locate, and red would read as an error.
+    static let missingReference = dynamic(light: "D97706", dark: "D97706")
 }
 
 extension Theme {

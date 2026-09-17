@@ -52,7 +52,9 @@ final class Library {
     /// Ids whose token no longer resolves. Rows stay visible and offer Locate;
     /// dropping them silently would lose the reference the user added.
     private(set) var missing: Set<UUID> = []
-    var selection: UUID?
+    var selection: UUID? {
+        didSet { UserDefaults.standard.set(selection?.uuidString, forKey: "selectedDocument") }
+    }
 
     private let store: FileRefStore
     private let fileURL: URL
@@ -130,7 +132,8 @@ final class Library {
         else { return }
         items = decoded
         refreshMissing()
-        selection = items.first(where: { !missing.contains($0.id) })?.id
+        let remembered = UserDefaults.standard.string(forKey: "selectedDocument").flatMap(UUID.init(uuidString:))
+        selection = items.first(where: { $0.id == remembered && !missing.contains($0.id) })?.id ?? items.first(where: { !missing.contains($0.id) })?.id
     }
 
     private func save() {

@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import WebKit
 
 /// Development tool: lays out a markdown file through the real renderer and the
 /// real text view offscreen, then writes a PNG.
@@ -26,14 +27,13 @@ enum RenderProof {
             return 1
         }
 
-        let content: NSAttributedString = switch mode {
-        case .preview: PreviewRenderer.render(markdown, face: .sans, measure: measure)
-        case .editor: SourceHighlighter.highlight(markdown)
+        if mode == .preview {
+            return renderPreview(markdown: markdown, baseURL: URL(filePath: inputPath), measure: measure, outputPath: outputPath)
         }
+        let content = SourceHighlighter.highlight(markdown)
 
         let width = measure + Theme.textInset.width * 2
         let textView = MeasuredTextView(usingTextLayoutManager: true)
-        textView.disableDefaultLinkChrome()
         textView.measure = measure
         textView.isRichText = false
         textView.drawsBackground = true
@@ -88,6 +88,76 @@ enum RenderProof {
 
         print("rendered \(mode.rawValue): \(Int(width))x\(Int(height)) -> \(outputPath)")
         return 0
+    }
+
+    /// The preview is a web view, so it is laid out by WebKit in a borderless
+    /// window sized to the page, then snapshotted. WebKit does not paint views
+    /// that are not on screen, which is why the window is ordered in.
+    private static func renderPreview(markdown: String, baseURL: URL, measure: CGFloat, outputPath: String) -> Int32 {
+        _ = NSApplication.shared
+        let width = measure + Theme.textInset.width * 2
+        let configuration = WKWebViewConfiguration()
+        configuration.setURLSchemeHandler(PreviewImageHandler(), forURLScheme: PreviewImages.scheme)
+        let webView = WKWebView(frame: NSRect(x: 0, y: 0, width: width, height: 600), configuration: configuration)
+        let window = NSWindow(contentRect: webView.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+        window.backgroundColor = .textBackgroundColor
+        window.contentView = webView
+        window.orderFrontRegardless()
+
+        let state = ProofState()
+        let delegate = ProofNavigationDelegate { [weak webView] in
+            guard let webView else { state.finish(1); return }
+            let html = HTMLRenderer.render(markdown, baseURL: baseURL)
+            webView.callAsyncJavaScript(
+                "window.reader.setStyle({measure, zoom, face, accent}); window.reader.setContent({html, line, keepScroll}); return document.documentElement.scrollHeight",
+                arguments: ["measure": Double(measure), "zoom": 1.0, "face": "sans", "accent": NSColor.controlAccentColor.cssHex,
+                            "html": html, "line": 1, "keepScroll": false],
+                in: nil, in: .page
+            ) { result in
+                MainActor.assumeIsolated {
+                    let height = ceil((try? result.get()) as? Double ?? 0)
+                    guard height > 0 else { fail("nothing laid out"); state.finish(1); return }
+                    window.setContentSize(NSSize(width: width, height: height))
+                    webView.frame = NSRect(x: 0, y: 0, width: width, height: height)
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+                        let snapshot = WKSnapshotConfiguration()
+                        snapshot.rect = webView.bounds
+                        webView.takeSnapshot(with: snapshot) { image, error in
+                            MainActor.assumeIsolated {
+                                guard let image, let tiff = image.tiffRepresentation, let rep = NSBitmapImageRep(data: tiff),
+                                      let data = rep.representation(using: .png, properties: [:]) else {
+                                    fail("snapshot failed: \(error?.localizedDescription ?? "unknown")"); state.finish(1); return
+                                }
+                                do { try data.write(to: URL(filePath: outputPath)) } catch { fail("cannot write \(outputPath): \(error)"); state.finish(1); return }
+                                print("rendered preview: \(Int(width))x\(Int(height)) -> \(outputPath)")
+                                state.finish(0)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        webView.navigationDelegate = delegate
+        webView.loadHTMLString(PreviewPage.shell, baseURL: nil)
+        let deadline = Date(timeIntervalSinceNow: 20)
+        while !state.done, Date() < deadline {
+            RunLoop.main.run(mode: .default, before: Date(timeIntervalSinceNow: 0.05))
+        }
+        if !state.done { fail("timed out waiting for WebKit") }
+        window.orderOut(nil)
+        return state.done ? state.code : 1
+    }
+
+    @MainActor private final class ProofState {
+        var done = false
+        var code: Int32 = 0
+        func finish(_ code: Int32) { self.code = code; done = true }
+    }
+
+    @MainActor private final class ProofNavigationDelegate: NSObject, @preconcurrency WKNavigationDelegate {
+        let onFinish: () -> Void
+        init(onFinish: @escaping () -> Void) { self.onFinish = onFinish }
+        func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) { onFinish() }
     }
 
     private static func fail(_ message: String) {
@@ -158,13 +228,14 @@ enum CursorProof {
     static func run() -> Int32 {
         let initial = "Hello world"
         let textView = MeasuredTextView(usingTextLayoutManager: true)
-        textView.disableDefaultLinkChrome()
         textView.measure = 880
         textView.textContainer?.lineFragmentPadding = 0
 
         var latestText = initial
         let coordinator = MarkdownTextPane.Coordinator(onEdit: { latestText = $0 })
         coordinator.textView = textView
+        coordinator.incomingKey = "cursor-proof"
+        coordinator.incomingSource = initial
         textView.delegate = coordinator
 
         coordinator.install(
@@ -189,6 +260,7 @@ enum CursorProof {
         // What RootView's `updateNSView` does on the SwiftUI re-render the edit
         // just triggered: recompute `content` from the (now-updated) model text
         // and call `install()` again.
+        coordinator.incomingSource = latestText
         coordinator.install(
             SourceHighlighter.highlight(latestText),
             mode: .editor,
@@ -218,10 +290,8 @@ enum CursorProof {
 
 // MARK: - Checkbox hit-target proof
 
-/// Confirms task-list checkboxes actually carry the `taskToggleLine` attribute
-/// that `MeasuredTextView.mouseDown` reads, and that the lines are the real
-/// source lines. Without this, "checkboxes are clickable" rests on the click
-/// path being wired correctly with nothing proving the target exists.
+/// Confirms every task item renders as a real checkbox carrying the source line
+/// the toggle handler will edit, and that the line really holds a task marker.
 @MainActor
 enum CheckboxProof {
     static func run(path: String) -> Int32 {
@@ -229,40 +299,26 @@ enum CheckboxProof {
             FileHandle.standardError.write(Data("cannot read \(path)\n".utf8))
             return 1
         }
-
-        let rendered = PreviewRenderer.render(markdown, face: .sans)
+        let html = HTMLRenderer.render(markdown)
         let sourceLines = markdown.components(separatedBy: "\n")
-
-        var found: [(index: Int, line: Int, glyph: String)] = []
-        rendered.enumerateAttribute(
-            .taskToggleLine,
-            in: NSRange(location: 0, length: rendered.length)
-        ) { value, range, _ in
-            guard let line = value as? Int else { return }
-            found.append((range.location, line, (rendered.string as NSString).substring(with: range)))
-        }
-
-        guard !found.isEmpty else {
-            print("FAIL: no checkbox hit-targets in the rendered output")
+        let pattern = try! NSRegularExpression(pattern: #"<input type="checkbox" data-line="(\d+)"[^>]*?( checked)?>"#)
+        let matches = pattern.matches(in: html, range: NSRange(location: 0, length: (html as NSString).length))
+        guard !matches.isEmpty else {
+            print("FAIL: no checkboxes in the rendered output")
             return 1
         }
-
         var ok = true
-        for hit in found {
-            let sourceIndex = hit.line - 1
-            let source = sourceLines.indices.contains(sourceIndex) ? sourceLines[sourceIndex] : "<out of range>"
-            // The attributed run should be the checkbox glyph, and the source
-            // line it points at should genuinely contain a task marker.
+        for match in matches {
+            let line = Int((html as NSString).substring(with: match.range(at: 1))) ?? 0
+            let checked = match.range(at: 2).location != NSNotFound
+            let source = sourceLines.indices.contains(line - 1) ? sourceLines[line - 1] : "<out of range>"
             let hasMarker = source.contains("[ ]") || source.contains("[x]") || source.contains("[X]")
-            let glyphOK = hit.glyph.contains("\u{2610}") || hit.glyph.contains("\u{2611}")
-            let status = (hasMarker && glyphOK) ? "ok  " : "BAD "
-            if !(hasMarker && glyphOK) { ok = false }
-            print("\(status)charIndex=\(hit.index) line=\(hit.line) glyph=\(hit.glyph.debugDescription) source=\(source.trimmingCharacters(in: .whitespaces).debugDescription)")
+            let stateMatches = checked ? !source.contains("[ ]") : source.contains("[ ]")
+            let good = hasMarker && stateMatches
+            if !good { ok = false }
+            print("\(good ? "ok  " : "BAD ")line=\(line) checked=\(checked) source=\(source.trimmingCharacters(in: .whitespaces).debugDescription)")
         }
-
-        print(ok
-            ? "PASS: \(found.count) checkbox hit-target(s), all mapped to real task lines"
-            : "FAIL: some hit-targets did not line up")
+        print(ok ? "PASS: \(matches.count) checkbox(es), all mapped to real task lines" : "FAIL: some checkboxes did not line up")
         return ok ? 0 : 1
     }
 }

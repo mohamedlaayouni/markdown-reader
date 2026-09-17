@@ -13,7 +13,13 @@ final class OpenInbox {
     private init() {}
 }
 
+@MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
+    static var confirmTermination: (() -> Bool)?
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        Self.confirmTermination?() == false ? .terminateCancel : .terminateNow
+    }
+
     func application(_ application: NSApplication, open urls: [URL]) {
         MainActor.assumeIsolated {
             OpenInbox.shared.pending.append(contentsOf: urls)

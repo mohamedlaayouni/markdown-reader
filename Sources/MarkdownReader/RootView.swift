@@ -6,324 +6,319 @@ struct RootView: View {
     @Bindable var settings: AppSettings
     @Bindable var library: Library
     @Bindable var document: DocumentModel
-
     @State private var columnVisibility: NavigationSplitViewVisibility = .all
-    @State private var conflictDate: Date?
-    @State private var saveError: String?
+    @State private var navigation = ReaderNavigation()
+    @State private var quickOpen = false
+    @State private var message: String?
+    @State private var imageRetry = 0
+    @State private var previewFindVisible = false
+    @State private var previewFindQuery = ""
+    @State private var previewFindFailed = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         NavigationSplitView(columnVisibility: $columnVisibility) {
-            SidebarView(library: library, onOpen: open, onAdd: openPanel)
-                .navigationSplitViewColumnWidth(min: 200, ideal: 244, max: 320)
+            SidebarView(library: library, onOpen: open, onAdd: openPanel, onRemove: remove, onLocate: relocate, revealed: settings.sidebarVisible)
+                .navigationSplitViewColumnWidth(min: 210, ideal: settings.sidebarWidth, max: 340)
+                .modifier(SettledWidthObserver { width in
+                    if width >= 210, abs(settings.sidebarWidth - Double(width)) > 0.5 {
+                        settings.sidebarWidth = Double(width)
+                    }
+                })
         } detail: {
-            detail
+            VStack(spacing: 0) {
+                if document.externalChange || document.fileUnavailable {
+                    HStack {
+                        Image(systemName: "exclamationmark.triangle")
+                        Text(document.fileUnavailable ? "This file is unavailable. Your edits are still here." : "This file changed elsewhere. Your edits are still here.")
+                        Spacer()
+                        Button("Reload…") { reload() }.disabled(document.fileUnavailable)
+                        Button("Save As…") { saveAs() }
+                    }.font(.callout).padding(10).background(.bar)
+                }
+                if document.url == nil {
+                    WelcomeView(onAdd: openPanel)
+                } else {
+                    Group {
+                        if settings.mode == .preview {
+                            PreviewWebPane(html: { HTMLRenderer.render(document.text, baseURL: document.url) },
+                                contentToken: token, documentKey: document.url?.path ?? "",
+                                measure: CGFloat(settings.measure), textScale: settings.textSize / Double(Theme.bodySize), face: settings.face,
+                                imageRevision: imageRetry, navigation: navigation, findQuery: previewFindVisible ? previewFindQuery : "",
+                                onToggleTask: toggleTask, onLink: openLink, onFeedback: { document.status = $0 },
+                                onFindResult: { previewFindFailed = !$0 })
+                                .overlay(alignment: .topTrailing) { if previewFindVisible { previewFindBar } }
+                        } else {
+                            MarkdownTextPane(mode: .editor, content: { content },
+                                measure: CGFloat(settings.measure), contentToken: token,
+                                onEdit: document.bufferDidChange,
+                                contentStyleToken: styleToken, documentKey: document.url?.path ?? "", source: document.text,
+                                navigation: navigation, textScale: settings.textSize / Double(Theme.bodySize),
+                                onFeedback: { document.status = $0 }, history: document.undoManager)
+                        }
+                    }
+                    .background(Color(nsColor: .textBackgroundColor))
+                }
+            }
         }
         .navigationTitle(document.url == nil ? "Markdown Reader" : document.displayName)
-        .navigationSubtitle(document.isDirty ? "Edited" : "")
+        .navigationSubtitle(document.isDirty ? "Edited" : document.status)
         .toolbar {
-            // One group, not two separate `ToolbarItem`s: a toolbar item whose
-            // content toggles between a button and nothing (the `if
-            // document.isDirty`) is exactly the case where AppKit has been known
-            // to mis-place `.primaryAction` items - which is what was pushing
-            // both controls to the leading edge instead of trailing. Grouping
-            // them keeps the layout stable across that conditional.
-            ToolbarItemGroup(placement: .primaryAction) {
-                // Always present, disabled when there is nothing to save, rather
-                // than appearing and vanishing: a toolbar item that comes and
-                // goes shifts the whole group's layout under it.
-                Button(action: attemptSave) {
-                    Label {
-                        Text("Save")
-                    } icon: {
-                        SaveDiskIcon()
-                            .stroke(style: StrokeStyle(lineWidth: 1.4, lineCap: .round, lineJoin: .round))
-                            .frame(width: 15, height: 15)
-                    }
+            ToolbarItem(placement: .primaryAction) {
+                Button { document.saveInteractively() } label: {
+                    SaveDiskIcon()
+                        .stroke(style: StrokeStyle(lineWidth: 1.5, lineCap: .round, lineJoin: .round))
+                        .frame(width: 15, height: 15)
+                        .accessibilityLabel("Save")
                 }
-                .disabled(!document.isDirty)
-                .help("Save changes to the file (\u{2318}S)")
-
-                ModeToggle(mode: $settings.mode)
-                    .disabled(document.url == nil)
+                .help("Save changes (⌘S)").disabled(!document.isDirty)
+            }
+            ToolbarItem(placement: .principal) {
+                ModeToggle(mode: $settings.mode).disabled(document.url == nil)
             }
         }
-        // Blend the toolbar into the page so it does not read as a separate bar.
-        // Safe now that the window title is visible: it was hiding the *title*
-        // that broke trailing placement, not hiding the background.
-        .toolbarBackgroundVisibility(.hidden, for: .windowToolbar)
-        .windowConfiguration(isDocumentEdited: document.isDirty)
+        .background(WindowConfiguration(document: document, isDirty: document.isDirty, url: document.url).frame(width: 0, height: 0))
+        .focusedSceneValue(\.appActions, actions)
+        .sheet(isPresented: $quickOpen) { QuickOpenView(items: library.items, open: open) }
+        .alert("Could not complete the action", isPresented: Binding(get: { message != nil }, set: { if !$0 { message = nil } })) {
+            Button("OK", role: .cancel) { message = nil }
+        } message: { Text(message ?? "") }
         .onChange(of: settings.sidebarVisible) { _, visible in
-            columnVisibility = visible ? .all : .detailOnly
+            let target: NavigationSplitViewVisibility = visible ? .all : .detailOnly
+            // The native toolbar already animates its own toggle. Do not echo it
+            // back into another transaction when we persist the resulting state.
+            guard columnVisibility != target else { return }
+            withAnimation(reduceMotion ? nil : Motion.sidebar) { columnVisibility = target }
         }
-        .onChange(of: columnVisibility) { _, value in
-            settings.sidebarVisible = (value != .detailOnly)
-        }
-        .alert(
-            "This file changed on disk",
-            isPresented: Binding(get: { conflictDate != nil }, set: { if !$0 { conflictDate = nil } })
-        ) {
-            Button("Overwrite", role: .destructive) {
-                conflictDate = nil
-                handle(document.forceSave())
-            }
-            Button("Reload from Disk") {
-                conflictDate = nil
-                try? document.revert()
-            }
-            Button("Cancel", role: .cancel) { conflictDate = nil }
-        } message: {
-            Text("Another program modified \(document.displayName) after you opened it. Overwriting replaces those changes with your version.")
-        }
-        .alert(
-            "Could not save",
-            isPresented: Binding(get: { saveError != nil }, set: { if !$0 { saveError = nil } })
-        ) {
-            Button("OK", role: .cancel) { saveError = nil }
-        } message: {
-            Text(saveError ?? "")
+        .onChange(of: columnVisibility) { _, visibility in
+            let visible = visibility != .detailOnly
+            if settings.sidebarVisible != visible { settings.sidebarVisible = visible }
         }
         .onChange(of: OpenInbox.shared.pending) { _, urls in
             guard !urls.isEmpty else { return }
             OpenInbox.shared.pending = []
-            library.add(urls)
-            if let first = urls.first,
-               let item = library.items.first(where: { library.url(for: $0) == first }) {
-                library.selection = item.id
-                open(item)
-            }
-            // Debug capture only: show the states that require unsaved changes.
-            if WindowCapture.request?.dirty == true {
-                document.bufferDidChange(to: document.text + "\n")
-            }
+            accept(urls)
         }
         .onAppear {
             columnVisibility = settings.sidebarVisible ? .all : .detailOnly
-            if let id = library.selection, let item = library.items.first(where: { $0.id == id }) {
-                open(item)
+            AppDelegate.confirmTermination = { document.confirmLeaving() }
+            if let item = library.items.first(where: { $0.id == library.selection }) { open(item) }
+            if !OpenInbox.shared.pending.isEmpty {
+                let urls = OpenInbox.shared.pending; OpenInbox.shared.pending = []; accept(urls)
             }
         }
-        .focusedSceneValue(\.appActions, AppActions(
-            openFiles: openPanel,
-            save: attemptSave,
-            toggleMode: settings.toggleMode,
-            toggleSidebar: { settings.sidebarVisible.toggle() },
-            canSave: document.isDirty,
-            hasDocument: document.url != nil
-        ))
-    }
-
-    // MARK: Detail
-
-    @ViewBuilder
-    private var detail: some View {
-        if document.url == nil {
-            WelcomeView(onAdd: openPanel)
-        } else {
-            MarkdownTextPane(
-                mode: settings.mode,
-                content: content,
-                measure: CGFloat(settings.measure),
-                contentToken: token,
-                onEdit: document.bufferDidChange,
-                onToggleTask: toggleTask
-            )
-            .background(Color(nsColor: .textBackgroundColor))
+        .task {
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(2))
+                guard !Task.isCancelled else { return }
+                document.checkExternalChanges(); library.refreshMissing()
+            }
+        }
+        .task(id: document.status) {
+            guard !document.status.isEmpty else { return }
+            try? await Task.sleep(for: .seconds(3))
+            if !Task.isCancelled { document.status = "" }
         }
     }
 
-    /// Preview renders the buffer, never a re-read of the file, so unsaved edits
-    /// show up rendered and switching modes stays a view change.
-    private var content: NSAttributedString {
-        switch settings.mode {
-        case .preview:
-            return PreviewRenderer.render(
-                document.text,
-                face: settings.face,
-                measure: CGFloat(settings.measure)
-            )
-        case .editor:
-            return SourceHighlighter.highlight(document.text)
-        }
-    }
-
-    /// Changes whenever the installed content should be replaced.
+    private var styleToken: String { "\(settings.textSize)" }
+    /// Preview style (face, measure, size) is applied live by the web pane and
+    /// does not re-render; the editor's highlighted source does not depend on it.
     private var token: String {
-        let path = document.url?.path(percentEncoded: false) ?? "none"
-        // Measure is part of the token because table columns are laid out to fit
-        // it: a width change is a re-render, not just a relayout.
-        return "\(path)|\(settings.mode.rawValue)|\(settings.face.rawValue)|\(document.text.count)|\(Int(settings.measure))"
+        settings.mode == .preview
+            ? "\(document.url?.path ?? "")|preview|\(document.revision)"
+            : "\(document.url?.path ?? "")|editor|\(document.revision)|\(styleToken)"
     }
-
-    // MARK: Actions
-
+    private var content: NSAttributedString {
+        SourceHighlighter.highlight(document.text).scaledFonts(by: settings.textSize / Double(Theme.bodySize))
+    }
+    /// Find in preview. The editor has AppKit's find bar; WebKit has none of its
+    /// own, so this small bar drives `WKWebView.find`.
+    private var previewFindBar: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
+            TextField("Find", text: $previewFindQuery)
+                .textFieldStyle(.plain).frame(width: 180)
+                .onSubmit { navigation.find(.nextMatch) }
+                .onExitCommand { previewFindVisible = false }
+            if previewFindFailed && !previewFindQuery.isEmpty { Text("Not found").font(.caption).foregroundStyle(.secondary) }
+            Button("Previous", systemImage: "chevron.up") { navigation.find(.previousMatch) }.labelStyle(.iconOnly)
+            Button("Next", systemImage: "chevron.down") { navigation.find(.nextMatch) }.labelStyle(.iconOnly)
+            Button("Done") { previewFindVisible = false }
+        }
+        .buttonStyle(.borderless).controlSize(.small)
+        .padding(.horizontal, 10).padding(.vertical, 6)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8))
+        .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(.separator))
+        .padding(12)
+    }
+    private func find(_ action: NSTextFinder.Action) {
+        guard settings.mode == .preview else { navigation.find(action); return }
+        switch action {
+        case .showFindInterface: previewFindVisible = true
+        case .hideFindInterface: previewFindVisible = false
+        default: if previewFindVisible { navigation.find(action) } else { previewFindVisible = true }
+        }
+    }
+    private var actions: AppActions {
+        AppActions(openFiles: openPanel, save: { document.saveInteractively() }, toggleMode: settings.toggleMode,
+            toggleSidebar: { settings.sidebarVisible.toggle() }, canSave: document.isDirty, hasDocument: document.url != nil,
+            quickOpen: { quickOpen = true },
+            find: find,
+            reveal: reveal, saveAs: saveAs, reloadImages: { imageRetry += 1 })
+    }
     private func open(_ item: LibraryItem) {
-        guard let url = library.url(for: item) else {
-            library.refreshMissing()
-            return
-        }
+        guard let url = library.url(for: item) else { library.refreshMissing(); return }
+        if document.url == url { library.selection = item.id; return }
+        guard document.confirmLeaving() else { return }
         do {
-            try document.open(url)
+            try document.open(url); library.selection = item.id
             if settings.alwaysOpenInPreview { settings.mode = .preview }
-        } catch {
-            saveError = "Could not open \(item.displayName): \(error.localizedDescription)"
-        }
+        } catch { message = error.localizedDescription }
     }
-
+    private func accept(_ urls: [URL]) {
+        library.add(urls)
+        if let first = urls.first, let item = library.items.first(where: { $0.token == first.path }) { open(item) }
+    }
     private func openPanel() {
-        let panel = NSOpenPanel()
-        panel.allowsMultipleSelection = true
-        panel.canChooseDirectories = false
-        panel.allowedContentTypes = [
-            UTType(filenameExtension: "md") ?? .plainText,
-            UTType(filenameExtension: "markdown") ?? .plainText,
-        ]
-        guard panel.runModal() == .OK else { return }
-        library.add(panel.urls)
-        if let first = panel.urls.first,
-           let item = library.items.first(where: { library.url(for: $0) == first }) {
-            library.selection = item.id
-            open(item)
+        let panel = NSOpenPanel(); panel.allowsMultipleSelection = true
+        panel.allowedContentTypes = ["md", "markdown", "mdown"].compactMap { UTType(filenameExtension: $0) }
+        if panel.runModal() == .OK { accept(panel.urls) }
+    }
+    private func remove(_ item: LibraryItem) {
+        if library.selection == item.id {
+            guard document.confirmLeaving() else { return }
+            document.close()
+            library.remove(item.id)
+            if let next = library.items.first(where: { $0.id == library.selection }) { open(next) }
+        } else { library.remove(item.id) }
+    }
+    private func reload() {
+        let alert = NSAlert(); alert.messageText = "Reload from disk?"
+        alert.informativeText = "This replaces your current edits with the file on disk."
+        alert.addButton(withTitle: "Cancel"); alert.addButton(withTitle: "Reload")
+        guard alert.runModal() == .alertSecondButtonReturn else { return }
+        do { try document.revert() } catch { message = error.localizedDescription }
+    }
+    private func saveAs() {
+        guard document.url != nil else { return }
+        let panel = NSSavePanel(); panel.nameFieldStringValue = document.displayName
+        panel.allowedContentTypes = [UTType(filenameExtension: "md") ?? .plainText]
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        switch document.saveAs(to: url) {
+        case .saved:
+            library.add([url])
+            library.selection = library.items.first(where: { $0.token == url.path })?.id
+        case .failed(let error): message = error.localizedDescription
+        default: break
         }
     }
+    private func relocate(_ item: LibraryItem, to url: URL) {
+        if library.selection == item.id {
+            guard document.confirmLeaving() else { return }
+            do { try document.open(url) } catch { message = error.localizedDescription; return }
+        }
+        library.relocate(item.id, to: url)
+    }
 
-    /// Flips `[ ]` and `[x]` on one source line.
-    ///
-    /// This is an edit like any other: it goes through the buffer and marks the
-    /// document dirty, so it still needs an explicit save. Preview stays
-    /// incapable of writing to disk on its own.
+    private func reveal() { if let url = document.url { NSWorkspace.shared.activateFileViewerSelecting([url]) } }
+    private func openLink(_ url: URL) {
+        if url.isFileURL {
+            let fragment = url.fragment?.removingPercentEncoding
+            var components = URLComponents(url: url, resolvingAgainstBaseURL: true); components?.fragment = nil
+            guard let file = components?.url else { return }
+            if ["md", "markdown", "mdown"].contains(file.pathExtension.lowercased()) {
+                accept([file])
+                if document.url == file, let fragment, let heading = DocumentStructure.headings(document.text).first(where: { DocumentStructure.slug($0.title) == fragment }) { navigation.jump(to: heading.line) }
+                return
+            }
+        }
+        if !NSWorkspace.shared.open(url) { message = "Could not open this link: \(url.absoluteString)" }
+    }
     private func toggleTask(onLine line: Int) {
         var lines = document.text.components(separatedBy: "\n")
-        let index = line - 1
-        guard lines.indices.contains(index) else { return }
-
-        let original = lines[index]
-        guard let range = original.range(of: "[ ]") ?? original.range(of: "[x]")
-            ?? original.range(of: "[X]")
-        else { return }
-
-        let checked = original[range] != "[ ]"
-        lines[index] = original.replacingCharacters(in: range, with: checked ? "[ ]" : "[x]")
+        guard lines.indices.contains(line - 1), let range = lines[line - 1].range(of: "[ ]") ?? lines[line - 1].range(of: "[x]") ?? lines[line - 1].range(of: "[X]") else { return }
+        let checked = lines[line - 1][range] != "[ ]"
+        lines[line - 1].replaceSubrange(range, with: checked ? "[ ]" : "[x]")
         document.bufferDidChange(to: lines.joined(separator: "\n"))
-    }
-
-    private func attemptSave() {
-        handle(document.save())
-    }
-
-    private func handle(_ outcome: DocumentModel.SaveOutcome) {
-        switch outcome {
-        case .saved, .nothingToSave:
-            break
-        case .conflict(let onDisk):
-            conflictDate = onDisk
-        case .failed(let error):
-            saveError = error.localizedDescription
-        }
+        document.undoManager.setActionName("Toggle Task")
     }
 }
-
-// MARK: - Welcome
 
 struct WelcomeView: View {
     let onAdd: () -> Void
-
     var body: some View {
-        VStack(spacing: 0) {
-            Image(systemName: "doc.text")
-                .font(.system(size: 44, weight: .light))
-                .foregroundStyle(.tertiary)
-
-            Text("No file open")
-                .font(.system(size: 22, weight: .semibold))
-                .padding(.top, 22)
-
-            Text("Add the markdown files scattered around your disk. They stay where they are; this only keeps a reference.")
-                .font(.system(size: 13.5))
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
-                .frame(maxWidth: 380)
-                .padding(.top, 8)
-
-            Button("Add Files\u{2026}", action: onAdd)
-                .buttonStyle(.borderedProminent)
-                .controlSize(.large)
-                .padding(.top, 24)
-
-            Text("or drag them into the sidebar")
-                .font(.caption)
-                .foregroundStyle(.tertiary)
-                .padding(.top, 10)
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        ContentUnavailableView {
+            Label("No file open", systemImage: "doc.text")
+        } description: {
+            Text("Add Markdown files to your library. Your files stay where they are.")
+        } actions: { Button("Add Files…", action: onAdd).buttonStyle(.glassProminent) }
     }
 }
-
-// MARK: - Mode toggle
-
-/// The platform segmented control rather than a hand-drawn pill: it picks up the
-/// Tahoe material and the accessibility behaviour for free, and text-only
-/// segments are what the HIG supports.
 struct ModeToggle: View {
     @Binding var mode: ViewMode
-
     var body: some View {
         Picker("View", selection: $mode) {
-            Text("Preview").tag(ViewMode.preview)
-            Text("Editor").tag(ViewMode.editor)
-        }
-        .pickerStyle(.segmented)
-        .labelsHidden()
-        .frame(width: 148)
-        .help("Switch between reading and editing (\u{2318}\u{21E7}P)")
+            Text("Preview").tag(ViewMode.preview); Text("Editor").tag(ViewMode.editor)
+        }.pickerStyle(.segmented).labelsHidden().frame(width: 148).help("Switch reading and editing (⌘⇧P)")
     }
 }
-
-// MARK: - Window plumbing
-
-/// Reaches the `NSWindow` for the one thing SwiftUI does not expose: the unsaved
-/// dot in the close button.
-///
-/// An earlier version of this also hid the title and the toolbar background to
-/// get a chromeless, floating look. That combination is what pushed the
-/// Save/Editor controls to the leading edge instead of trailing: with no title
-/// to anchor against, the toolbar had nothing to compute trailing space from.
-/// A standard titlebar is worth more than the flourish.
 private struct WindowConfiguration: NSViewRepresentable {
-    let isDocumentEdited: Bool
-
-    func makeNSView(context: Context) -> NSView {
-        NSView(frame: .zero)
-    }
-
+    let document: DocumentModel
+    let isDirty: Bool
+    let url: URL?
+    func makeCoordinator() -> Coordinator { Coordinator(document: document) }
+    func makeNSView(context: Context) -> NSView { NSView() }
     func updateNSView(_ view: NSView, context: Context) {
         DispatchQueue.main.async {
             guard let window = view.window else { return }
-            window.isDocumentEdited = isDocumentEdited
-            // Fullscreen otherwise restores AppKit's titlebar divider even
-            // though SwiftUI has made the toolbar background transparent.
-            // Suppress the native separator so fullscreen and windowed chrome
-            // keep the same floating, borderless treatment.
-            window.titlebarSeparatorStyle = .none
+            window.isDocumentEdited = isDirty
+            window.representedURL = url
+            window.toolbarStyle = .unified
+            if window.frameAutosaveName.isEmpty {
+                window.setFrameAutosaveName("MarkdownReaderMainWindow")
+                window.setFrameUsingName("MarkdownReaderMainWindow")
+            }
+            window.delegate = context.coordinator
+        }
+    }
+    final class Coordinator: NSObject, NSWindowDelegate {
+        let document: DocumentModel
+        init(document: DocumentModel) { self.document = document }
+        func windowWillReturnUndoManager(_ window: NSWindow) -> UndoManager? { document.undoManager }
+        func windowShouldClose(_ sender: NSWindow) -> Bool {
+            guard document.confirmLeaving() else { return false }
+            document.close()
+            return true
         }
     }
 }
 
-// Fullscreen note, so this does not get "fixed" back:
-//
-// An earlier version opted the window into `.autoHideToolbar` so the toolbar
-// would slide away in fullscreen. That is what caused the sidebar's "Library"
-// header to be swallowed: `.autoHideToolbar` turns the toolbar into an OVERLAY
-// rather than a bar that reserves space, and combined with a hidden toolbar
-// background SwiftUI then stops insetting content for it - so the toolbar sat on
-// top of the sidebar and clipped its first rows.
-//
-// Letting the toolbar reserve its space normally is what keeps the layout
-// correct. It stays visible in fullscreen, but `.toolbarBackgroundVisibility`
-// is hidden, so it reads as controls floating over the page rather than as a
-// separate bar.
+extension NSAttributedString {
+    func scaledFonts(by scale: Double) -> NSAttributedString {
+        guard abs(scale - 1) > 0.001 else { return self }
+        let out = NSMutableAttributedString(attributedString: self)
+        enumerateAttribute(.font, in: NSRange(location: 0, length: length)) { value, range, _ in
+            if let font = value as? NSFont { out.addAttribute(.font, value: NSFont(descriptor: font.fontDescriptor, size: font.pointSize * scale) ?? font, range: range) }
+        }
+        return out
+    }
+}
 
-extension View {
-    func windowConfiguration(isDocumentEdited: Bool) -> some View {
-        background(WindowConfiguration(isDocumentEdited: isDocumentEdited).frame(width: 0, height: 0))
+/// Keep per-frame split-view geometry local. Only the settled width reaches the
+/// document renderer and persisted settings, avoiding whole-window updates.
+private struct SettledWidthObserver: ViewModifier {
+    let onChange: (CGFloat) -> Void
+    @State private var width: CGFloat = 0
+
+    func body(content: Content) -> some View {
+        content
+            .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { width = $0 }
+            .task(id: width) {
+                guard width > 0 else { return }
+                do { try await Task.sleep(for: .milliseconds(350)) }
+                catch { return }
+                onChange(width)
+            }
     }
 }
