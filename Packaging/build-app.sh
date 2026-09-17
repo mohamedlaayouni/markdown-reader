@@ -47,16 +47,15 @@ mkdir -p "$CONTENTS/MacOS" "$CONTENTS/Resources"
 cp "$BINARY" "$CONTENTS/MacOS/$EXECUTABLE"
 
 echo "==> Icon"
-ICONSET="$(mktemp -d)/icon.iconset"
-mkdir -p "$ICONSET"
-swift -sdk "$READER_SDK" "$ROOT/Packaging/makeicon.swift" "$ICONSET/base.png"
-for size in 16 32 128 256 512; do
-  sips -z $size $size "$ICONSET/base.png" --out "$ICONSET/icon_${size}x${size}.png" >/dev/null
-  double=$((size * 2))
-  sips -z $double $double "$ICONSET/base.png" --out "$ICONSET/icon_${size}x${size}@2x.png" >/dev/null
-done
-rm "$ICONSET/base.png"
-iconutil -c icns "$ICONSET" -o "$CONTENTS/Resources/AppIcon.icns"
+# Icon Composer document -> Assets.car (light/dark/tinted variants) + legacy .icns.
+# Layers are regenerated from the same geometry as makeicon.swift.
+swift -sdk "$READER_SDK" "$ROOT/Packaging/makeiconsvg.swift" "$ROOT/Packaging/AppIcon.icon/Assets"
+ICON_OUT="$(mktemp -d)"
+xcrun actool "$ROOT/Packaging/AppIcon.icon" --compile "$ICON_OUT" --platform macosx --minimum-deployment-target "$MIN_MACOS" \
+  --app-icon AppIcon --output-partial-info-plist "$ICON_OUT/partial.plist" --output-format human-readable-text 2>&1 \
+  | grep -Ei "error|warning" || true
+cp "$ICON_OUT/Assets.car" "$ICON_OUT/AppIcon.icns" "$CONTENTS/Resources/"
+rm -rf "$ICON_OUT"
 
 echo "==> Info.plist"
 cat > "$CONTENTS/Info.plist" <<PLIST
@@ -72,6 +71,7 @@ cat > "$CONTENTS/Info.plist" <<PLIST
     <key>CFBundleShortVersionString</key><string>$VERSION</string>
     <key>CFBundleVersion</key><string>$BUILD</string>
     <key>CFBundleIconFile</key><string>AppIcon</string>
+    <key>CFBundleIconName</key><string>AppIcon</string>
     <key>LSMinimumSystemVersion</key><string>$MIN_MACOS</string>
     <key>NSHighResolutionCapable</key><true/>
     <key>NSPrincipalClass</key><string>NSApplication</string>
