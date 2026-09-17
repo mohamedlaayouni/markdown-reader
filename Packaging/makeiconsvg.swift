@@ -46,6 +46,6 @@ path.applyWithBlock { element in
     }
 }
 let head = "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 1024 1024\" width=\"1024\" height=\"1024\">"
-try! "\(head)\n  <path d=\"\(d)\" fill=\"#1C1C1E\" fill-rule=\"nonzero\"/>\n</svg>\n".write(toFile: dir + "/letters.svg", atomically: true, encoding: .utf8)
+try! "\(head)\n  <path d=\"\(d)\" fill=\"#FFFFFF\" fill-rule=\"nonzero\"/>\n</svg>\n".write(toFile: dir + "/letters.svg", atomically: true, encoding: .utf8)
 let cy = side - (baselineY + dot / 2)
 try! "\(head)\n  <circle cx=\"\(originX + dot / 2)\" cy=\"\(cy)\" r=\"\(dot / 2)\" fill=\"#E5484D\"/>\n</svg>\n".write(toFile: dir + "/dot.svg", atomically: true, encoding: .utf8)
