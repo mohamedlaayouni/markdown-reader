@@ -26,6 +26,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    /// Takes the open-documents Apple event before SwiftUI does. Left to itself,
+    /// SwiftUI's own handler looks for a scene to hand the file to and, finding
+    /// none for a single `Window`, closes that window - and with it the app,
+    /// since the last window closing quits. Opening a file while the app was
+    /// already running therefore looked like a crash.
+    func applicationWillFinishLaunching(_ notification: Notification) {
+        NSAppleEventManager.shared().setEventHandler(
+            self,
+            andSelector: #selector(handleOpenDocuments(_:withReplyEvent:)),
+            forEventClass: AEEventClass(kCoreEventClass),
+            andEventID: AEEventID(kAEOpenDocuments))
+    }
+
+    @objc private func handleOpenDocuments(_ event: NSAppleEventDescriptor, withReplyEvent reply: NSAppleEventDescriptor) {
+        guard let direct = event.paramDescriptor(forKeyword: AEKeyword(keyDirectObject)) else { return }
+        let items = direct.numberOfItems > 0 ? (1...direct.numberOfItems).compactMap { direct.atIndex($0) } : [direct]
+        let urls = items.compactMap(\.fileURLValue)
+        guard !urls.isEmpty else { return }
+        MainActor.assumeIsolated {
+            OpenInbox.shared.pending.append(contentsOf: urls)
+        }
+    }
+
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         true
     }
